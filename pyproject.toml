@@ -33,6 +33,8 @@ dependencies = [
     # Utilities
     "python-dotenv",
     "numpy",
+    # WhatsApp integration (optional — only active when WHATSAPP_ENABLED=true)
+    "twilio",
     "langchain-postgres>=0.0.17",
     "langchain-chroma>=1.1.0",
     "langchain-huggingface>=1.2.2",

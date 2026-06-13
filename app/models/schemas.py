@@ -33,3 +33,5 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     session_id: UUID
     answer: str
+    elapsed_ms: int
+    citations: list[dict] = []

@@ -169,8 +169,13 @@ class ProgressCard {
     clearWelcome();
     document.getElementById('messages').appendChild(div);
     scrollToBottom();
-    this._stepsEl = div.querySelector('.progress-steps');
-    this._totalEl = div.querySelector('.progress-total');
+    this._titleEl  = div.querySelector('.progress-title');
+    this._stepsEl  = div.querySelector('.progress-steps');
+    this._totalEl  = div.querySelector('.progress-total');
+  }
+
+  setTitle(title) {
+    this._titleEl.textContent = title;
   }
 
   addStep(stage, message) {
@@ -207,10 +212,10 @@ class ProgressCard {
     s.row.querySelector('.ps-timer').textContent = '';
   }
 
-  complete(totalElapsed) {
+  complete(totalElapsed, message = 'Document processed') {
     Object.values(this._steps).forEach(s => clearInterval(s.interval));
     this._totalEl.classList.remove('hidden');
-    this._totalEl.textContent = `Complete — total time: ${totalElapsed.toFixed(2)}s`;
+    this._totalEl.textContent = `${message} — ${totalElapsed.toFixed(2)}s`;
     scrollToBottom();
   }
 
@@ -244,11 +249,13 @@ async function readSSEStream(response, onEvent) {
 
 function handleProgressEvent(card, ev) {
   if (ev.type === 'step') {
+    if (ev.title) card.setTitle(ev.title);
     if (ev.status === 'start') card.addStep(ev.stage, ev.message);
     else if (ev.status === 'done') card.doneStep(ev.stage, ev.message, ev.elapsed ?? 0);
     else if (ev.status === 'error') card.errorStep(ev.stage, ev.message);
   } else if (ev.type === 'complete') {
-    card.complete(ev.total_elapsed ?? 0);
+    card.setTitle('Process done');
+    card.complete(ev.total_elapsed ?? 0, ev.completion_message || 'Document processed');
     onProcessed(ev.session_id);
     toast('Ready to chat!', 'success');
   } else if (ev.type === 'error') {
@@ -380,7 +387,7 @@ async function sendMessage() {
     });
     const data = await safeJson(res);
     if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
-    appendMessage('bot', data.answer);
+    appendMessage('bot', data.answer, data.elapsed_ms, data.citations || []);
   } catch (err) {
     appendMessage('bot', `Error: ${err.message}`);
     toast(err.message, 'error');
@@ -390,7 +397,7 @@ async function sendMessage() {
 }
 
 /* ── Message rendering ───────────────────────────────────────── */
-function appendMessage(role, text) {
+function appendMessage(role, text, elapsedMs = null, citations = []) {
   const messages = document.getElementById('messages');
 
   const div = document.createElement('div');
@@ -404,6 +411,38 @@ function appendMessage(role, text) {
     ? marked.parse(text)
     : `<p>${escHtml(text)}</p>`;
 
+  const timingHtml = (role === 'bot' && elapsedMs != null)
+    ? `<div class="answer-timing">⏱ ${elapsedMs.toLocaleString()} ms</div>`
+    : '';
+
+  let citationsHtml = '';
+  if (role === 'bot' && citations.length > 0) {
+    const id = 'cit-' + Math.random().toString(36).slice(2, 8);
+    const rows = citations.map(c => {
+      const src = escHtml(c.source || 'unknown');
+      const chunk = c.chunk_index ?? '?';
+      const preview = escHtml((c.preview || '').replace(/\n+/g, ' '));
+      const pageHtml = c.page_number != null ? `<span class="cit-sep">—</span><span class="cit-page">Page ${c.page_number}</span>` : '';
+      const confHtml = c.confidence != null ? `<span class="cit-sep">—</span><span class="cit-conf">Confidence ${(c.confidence * 100).toFixed(1)}%</span>` : '';
+      return `<div class="citation-item">
+        <span class="cit-arrow">▶</span>
+        <span class="cit-source">${src}</span>
+        <span class="cit-sep">—</span>
+        <span class="cit-chunk">Chunk #${chunk}</span>
+        ${pageHtml}${confHtml}
+        <span class="cit-sep">—</span>
+        <span class="cit-preview">"${preview}"</span>
+      </div>`;
+    }).join('');
+    citationsHtml = `
+      <div class="citations-block">
+        <button class="citations-toggle" onclick="toggleCitations('${id}')">
+          <span class="cit-toggle-icon">▶</span> ${citations.length} source${citations.length > 1 ? 's' : ''} used
+        </button>
+        <div class="citations-list hidden" id="${id}">${rows}</div>
+      </div>`;
+  }
+
   const copyBtn = role === 'bot'
     ? `<div class="bubble-actions">
         <button class="copy-btn" onclick="copyText(this, ${JSON.stringify(text)})">
@@ -416,12 +455,20 @@ function appendMessage(role, text) {
   div.innerHTML = `
     ${avatarHtml}
     <div>
-      <div class="bubble">${content}</div>
+      <div class="bubble">${content}${timingHtml}${citationsHtml}</div>
       ${copyBtn}
     </div>`;
 
   messages.appendChild(div);
   scrollToBottom();
+}
+
+function toggleCitations(id) {
+  const list = document.getElementById(id);
+  const btn  = list.previousElementSibling;
+  const icon = btn.querySelector('.cit-toggle-icon');
+  const open = list.classList.toggle('hidden');
+  icon.textContent = open ? '▶' : '▼';
 }
 
 function clearWelcome() {

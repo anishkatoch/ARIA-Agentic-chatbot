@@ -1,4 +1,5 @@
 import logging
+import os
 import subprocess
 import sys
 from contextlib import asynccontextmanager
@@ -34,6 +35,11 @@ app = FastAPI(
 
 app.include_router(upload.router)
 app.include_router(chat.router)
+
+if os.getenv("WHATSAPP_ENABLED", "false").lower() == "true":
+    from app.routers import whatsapp
+    app.include_router(whatsapp.router)
+    logger.info("WhatsApp webhook active at /whatsapp/webhook")
 
 
 @app.get("/health")

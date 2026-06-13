@@ -14,7 +14,12 @@ MAX_FILES_PER_SESSION = int(os.getenv("MAX_FILES_PER_SESSION", 3))
 _parser = LiteParse()
 
 
-async def parse_file(content: bytes, filename: str) -> str:
+def _avg_confidence(page) -> float | None:
+    scores = [item.confidence for item in page.text_items if item.confidence is not None]
+    return round(sum(scores) / len(scores), 4) if scores else None
+
+
+async def parse_file(content: bytes, filename: str) -> tuple[str, list[dict]]:
     ext = os.path.splitext(filename)[1].lower()
     size_kb = len(content) / 1024
     logger.info(f"[PARSE] Starting — file={filename}, size={size_kb:.1f} KB, type={ext}")
@@ -23,16 +28,27 @@ async def parse_file(content: bytes, filename: str) -> str:
     if ext == ".txt":
         text = content.decode("utf-8", errors="ignore")
         logger.info(f"[PARSE] Done (plain text) — chars={len(text)}, time={time.time()-t0:.2f}s")
-        return text
+        page_spans = [{"page_number": 1, "start": 0, "end": len(text), "confidence": None}]
+        return text, page_spans
 
     with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
         tmp.write(content)
         tmp_path = tmp.name
     try:
         result = _parser.parse(tmp_path)
-        text = result.text
-        logger.info(f"[PARSE] Done (LiteParse) — chars={len(text)}, time={time.time()-t0:.2f}s")
-        return text
+        full_text = ""
+        page_spans = []
+        for page in result.pages:
+            start = len(full_text)
+            page_spans.append({
+                "page_number": page.page_num,
+                "start": start,
+                "end": start + len(page.text),
+                "confidence": _avg_confidence(page),
+            })
+            full_text += page.text + "\n"
+        logger.info(f"[PARSE] Done (LiteParse) — pages={len(page_spans)}, chars={len(full_text)}, time={time.time()-t0:.2f}s")
+        return full_text, page_spans
     finally:
         os.unlink(tmp_path)
 

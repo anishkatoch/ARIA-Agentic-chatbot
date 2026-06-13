@@ -1,3 +1,13 @@
+---
+title: RAG Chat With Data
+emoji: 📄
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 8001
+pinned: false
+---
+
 # datascout-ai — RAG Data Assistant
 
 A production-ready RAG (Retrieval-Augmented Generation) backend that lets users chat with their data. Upload files, scrape URLs, or pull from JSON APIs — the backend parses, chunks, embeds, and stores everything in pgvector, then answers questions using an LLM with MMR retrieval.
