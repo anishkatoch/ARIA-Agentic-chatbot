@@ -28,6 +28,7 @@ dependencies = [
     "openai",
     "langchain",
     "langchain-openai",
+    "langchain-groq",
     "langchain-text-splitters",
     "tiktoken",
     # Utilities

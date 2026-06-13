@@ -1,7 +1,7 @@
 import logging
 import os
 import time
-from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -9,10 +9,11 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 logger = logging.getLogger(__name__)
 
 
-def get_llm() -> ChatOpenAI:
-    return ChatOpenAI(
-        model="gpt-4o-mini",
-        openai_api_key=os.getenv("OPENAI_API_KEY"),
+def get_llm() -> ChatGroq:
+    model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    return ChatGroq(
+        model=model,
+        groq_api_key=os.getenv("GROQ_API_KEY"),
         temperature=0.2,
     )
 
@@ -76,7 +77,7 @@ def answer_question(vectorstore, question: str) -> tuple[str, int, list[dict]]:
         "Question: {question}"
     )
 
-    logger.info("[LLM] Calling gpt-4o-mini...")
+    logger.info(f"[LLM] Calling {os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')} via Groq...")
     chain = prompt | get_llm() | StrOutputParser()
     answer = chain.invoke({"context": context, "question": question})
 
