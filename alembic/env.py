@@ -1,33 +1,24 @@
 from logging.config import fileConfig
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool
 from alembic import context
-from dotenv import load_dotenv
-import os
 
-load_dotenv()
-
+from app.config import cfg
 from app.models.db import Base
 
-config = context.config
+alembic_config = context.config
 
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+if alembic_config.config_file_name is not None:
+    fileConfig(alembic_config.config_file_name)
 
-# Build DATABASE_URL from individual .env parts
-from urllib.parse import quote_plus
-host     = os.getenv("DB_HOST")
-port     = os.getenv("DB_PORT", "5432")
-user     = quote_plus(os.getenv("DB_USER", ""))
-password = quote_plus(os.getenv("DB_PASSWORD", ""))  # handles special chars like @, #, $
-name     = os.getenv("DB_NAME")
-database_url = f"postgresql://{user}:{password}@{host}:{port}/{name}"
-config.set_main_option("sqlalchemy.url", database_url)
-
+# Never pass URL through configparser (it chokes on % from URL-encoding).
+# Use cfg.db_url directly in both offline and online modes.
 target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    url = config.get_main_option("sqlalchemy.url")
+    url = cfg.db_url
+    if not url:
+        raise RuntimeError("DB_HOST is not set — cannot run migrations offline")
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -39,11 +30,10 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    url = cfg.db_url
+    if not url:
+        raise RuntimeError("DB_HOST is not set — cannot run migrations")
+    connectable = create_engine(url, poolclass=pool.NullPool)
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():

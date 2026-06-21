@@ -1,5 +1,5 @@
-from pydantic import BaseModel, HttpUrl
-from typing import Optional
+from pydantic import BaseModel
+from typing import Optional, Literal
 from uuid import UUID
 
 
@@ -16,7 +16,7 @@ class URLIngestRequest(BaseModel):
 
 class APIIngestRequest(BaseModel):
     url: str
-    headers: Optional[dict[str, str]] = None  # optional — leave empty for public APIs
+    headers: Optional[dict[str, str]] = None
     session_id: Optional[UUID] = None
 
 
@@ -35,3 +35,13 @@ class ChatResponse(BaseModel):
     answer: str
     elapsed_ms: int
     citations: list[dict] = []
+
+
+class ConfirmRequest(BaseModel):
+    confirm_token: str
+    action: Literal["reuse", "reprocess"]
+
+
+class ConfirmResponse(BaseModel):
+    status: str
+    message: str

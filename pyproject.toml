@@ -33,16 +33,32 @@ dependencies = [
     "tiktoken",
     # Utilities
     "python-dotenv",
+    "pyyaml",
     "numpy",
     # WhatsApp integration (optional — only active when WHATSAPP_ENABLED=true)
     "twilio",
     "langchain-postgres>=0.0.17",
     "langchain-chroma>=1.1.0",
     "langchain-huggingface>=1.2.2",
+    # Phase 7 — LangGraph RAG pipeline
+    "langgraph>=0.2.0",
+    "rank-bm25>=0.2.2",
+    "neo4j>=5.0.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
 
 [tool.uv]
 python-version = "3.13"
 
 [tool.uv.scripts]
 setup = "playwright install chromium"
+test  = "pytest tests/ -v"

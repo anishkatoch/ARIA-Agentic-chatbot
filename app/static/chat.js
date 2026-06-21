@@ -1,19 +1,54 @@
 /* ── State ───────────────────────────────────────────────────── */
 const state = {
-  sessionId: null,
-  activeTab: 'files',
-  files: [],
+  sessionId:    null,
+  clientToken:  null,
+  activeTab:    'files',
+  files:        [],
   isProcessing: false,
-  isReady: false,
+  isReady:      false,
+  advancedMode: false,
 };
+window._ragState = state; // expose for testing
 
 /* ── Init ────────────────────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', () => {
+  initClientToken();
+  initAdvancedMode();
   setupTabs();
   setupDragDrop();
   setupFileInput();
   setupHeadersToggle();
 });
+
+function initClientToken() {
+  let token = localStorage.getItem('rag_client_token');
+  if (!token) {
+    try {
+      token = crypto.randomUUID();
+    } catch (_) {
+      // crypto.randomUUID() requires HTTPS or localhost — use a fallback
+      token = 'uid-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    }
+    localStorage.setItem('rag_client_token', token);
+  }
+  state.clientToken = token;
+}
+
+function initAdvancedMode() {
+  state.advancedMode = localStorage.getItem('rag_advanced_mode') === 'true';
+  const toggle = document.getElementById('advanced-toggle');
+  if (toggle) {
+    toggle.checked = state.advancedMode;
+    toggle.addEventListener('change', () => {
+      state.advancedMode = toggle.checked;
+      localStorage.setItem('rag_advanced_mode', state.advancedMode);
+      const label = document.getElementById('advanced-label');
+      if (label) label.textContent = state.advancedMode ? 'Advanced Mode: ON' : 'Advanced Mode: OFF';
+    });
+    const label = document.getElementById('advanced-label');
+    if (label) label.textContent = state.advancedMode ? 'Advanced Mode: ON' : 'Advanced Mode: OFF';
+  }
+}
 
 /* ── Tabs ────────────────────────────────────────────────────── */
 function setupTabs() {
@@ -31,21 +66,46 @@ function setupTabs() {
 
 /* ── Drag & Drop ─────────────────────────────────────────────── */
 function setupDragDrop() {
-  const zone = document.getElementById('drop-zone');
+  const zone    = document.getElementById('drop-zone');
+  const overlay = document.getElementById('drag-overlay');
+  let dragCounter = 0;
 
-  zone.addEventListener('dragover', e => {
+  // ── Whole-page drag listeners (catch files dragged anywhere on page) ──
+  document.addEventListener('dragenter', e => {
+    // Only react to file drags, not element drags
+    if (!e.dataTransfer || ![...e.dataTransfer.types].includes('Files')) return;
     e.preventDefault();
+    dragCounter++;
+    overlay.classList.remove('hidden');
     zone.classList.add('dragover');
   });
 
-  zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
-
-  zone.addEventListener('drop', e => {
+  document.addEventListener('dragover', e => {
+    if (!e.dataTransfer || ![...e.dataTransfer.types].includes('Files')) return;
     e.preventDefault();
-    zone.classList.remove('dragover');
-    addFiles([...e.dataTransfer.files]);
+    e.dataTransfer.dropEffect = 'copy';
   });
 
+  document.addEventListener('dragleave', e => {
+    if (!e.dataTransfer || ![...e.dataTransfer.types].includes('Files')) return;
+    // Only hide overlay when leaving the browser window entirely
+    if (e.clientX === 0 && e.clientY === 0) {
+      dragCounter = 0;
+      overlay.classList.add('hidden');
+      zone.classList.remove('dragover');
+    }
+  });
+
+  document.addEventListener('drop', e => {
+    e.preventDefault();
+    dragCounter = 0;
+    overlay.classList.add('hidden');
+    zone.classList.remove('dragover');
+    const files = e.dataTransfer ? [...e.dataTransfer.files] : [];
+    if (files.length > 0) addFiles(files);
+  });
+
+  // ── Zone click → open file browser ───────────────────────────
   zone.addEventListener('click', (e) => {
     if (e.target.closest('.browse-btn')) return;
     document.getElementById('file-input').click();
@@ -60,12 +120,13 @@ function setupFileInput() {
 }
 
 /* ── File management ─────────────────────────────────────────── */
-const MAX_FILES = parseInt(getComputedEnv('MAX_FILES_PER_SESSION', 3));
-const MAX_MB    = parseInt(getComputedEnv('MAX_FILE_SIZE_MB', 15));
-const ALLOWED   = ['.pdf', '.doc', '.docx', '.txt'];
+const MAX_FILES      = 5;
+const MAX_MB         = 15;
+const MAX_SESSION_MB = 50;
+const ALLOWED        = ['.pdf', '.doc', '.docx', '.txt'];
 
-function getComputedEnv(key, fallback) {
-  return fallback;
+function totalSizeBytes() {
+  return state.files.reduce((sum, f) => sum + f.size, 0);
 }
 
 function addFiles(newFiles) {
@@ -76,7 +137,7 @@ function addFiles(newFiles) {
       return false;
     }
     if (f.size > MAX_MB * 1024 * 1024) {
-      toast(`${f.name}: exceeds ${MAX_MB}MB limit`, 'error');
+      toast(`${f.name}: exceeds ${MAX_MB} MB per-file limit`, 'error');
       return false;
     }
     return true;
@@ -84,10 +145,19 @@ function addFiles(newFiles) {
 
   const combined = [...state.files, ...allowed];
   if (combined.length > MAX_FILES) {
-    toast(`Maximum ${MAX_FILES} files per session`, 'error');
+    toast(`Maximum ${MAX_FILES} files per session — extra files skipped`, 'error');
     state.files = combined.slice(0, MAX_FILES);
   } else {
     state.files = combined;
+  }
+
+  const totalMB = totalSizeBytes() / (1024 * 1024);
+  if (totalMB > MAX_SESSION_MB) {
+    toast(`Total size ${totalMB.toFixed(1)} MB exceeds the ${MAX_SESSION_MB} MB session limit`, 'error');
+    // Remove files until we're under the limit
+    while (totalSizeBytes() > MAX_SESSION_MB * 1024 * 1024 && state.files.length > 0) {
+      state.files.pop();
+    }
   }
 
   renderFileList();
@@ -102,7 +172,7 @@ function renderFileList() {
   const list = document.getElementById('file-list');
   list.innerHTML = '';
   state.files.forEach((file, i) => {
-    const ext = file.name.split('.').pop().toUpperCase();
+    const ext  = file.name.split('.').pop().toUpperCase();
     const size = formatBytes(file.size);
     list.innerHTML += `
       <div class="file-chip">
@@ -114,6 +184,17 @@ function renderFileList() {
         <button class="file-chip-remove" onclick="removeFile(${i})">×</button>
       </div>`;
   });
+
+  if (state.files.length > 0) {
+    const usedMB  = totalSizeBytes() / (1024 * 1024);
+    const pct     = Math.min(100, (usedMB / MAX_SESSION_MB) * 100).toFixed(1);
+    const fillCls = pct >= 90 ? 'danger' : pct >= 70 ? 'warn' : '';
+    list.innerHTML += `
+      <div class="session-size-bar">
+        <span>${usedMB.toFixed(1)} MB of ${MAX_SESSION_MB} MB</span>
+        <div class="bar-track"><div class="bar-fill ${fillCls}" style="width:${pct}%"></div></div>
+      </div>`;
+  }
 }
 
 /* ── Headers ─────────────────────────────────────────────────── */
@@ -253,6 +334,8 @@ function handleProgressEvent(card, ev) {
     if (ev.status === 'start') card.addStep(ev.stage, ev.message);
     else if (ev.status === 'done') card.doneStep(ev.stage, ev.message, ev.elapsed ?? 0);
     else if (ev.status === 'error') card.errorStep(ev.stage, ev.message);
+  } else if (ev.type === 'dedup_confirm') {
+    handleDedupConfirm(card, ev);
   } else if (ev.type === 'complete') {
     card.setTitle('Process done');
     card.complete(ev.total_elapsed ?? 0, ev.completion_message || 'Document processed');
@@ -261,6 +344,73 @@ function handleProgressEvent(card, ev) {
   } else if (ev.type === 'error') {
     card.fail(ev.message);
     toast(ev.message, 'error');
+  }
+}
+
+/* ── Dedup confirmation ──────────────────────────────────────── */
+function handleDedupConfirm(card, ev) {
+  // Stop the "Checking…" spinner for this stage
+  const prev = card._steps[ev.stage];
+  if (prev) {
+    clearInterval(prev.interval);
+    prev.row.className = 'progress-step done';
+    prev.row.querySelector('.ps-label').textContent = `${escHtml(ev.filename)} — duplicate found`;
+    prev.row.querySelector('.ps-timer').textContent = '';
+  }
+
+  // Confirm card uses its own class to avoid .progress-step grid conflict
+  const row = document.createElement('div');
+  row.className = 'dedup-confirm-card';
+  row.dataset.confirmToken = ev.confirm_token;
+  row.innerHTML = `
+    <div class="dedup-title">${escHtml(ev.filename)}</div>
+    <div class="dedup-meta">${escHtml(ev.file_size)} · ${ev.chunks_stored || 0} chunks already stored</div>
+    <div class="dedup-buttons">
+      <button class="dedup-btn reuse" onclick="sendDedupAction('${ev.confirm_token}', 'reuse', this)">Use existing</button>
+      <button class="dedup-btn reprocess" onclick="sendDedupAction('${ev.confirm_token}', 'reprocess', this)">Re-upload</button>
+    </div>
+    <div class="dedup-countdown">Auto-reprocessing in <span class="countdown-num">60</span>s</div>`;
+  card._stepsEl.appendChild(row);
+  scrollToBottom();
+
+  // Store separately — do NOT overwrite card._steps[ev.stage].
+  // doneStep() must still operate on the original "✓ duplicate found" row.
+  card._confirmCards = card._confirmCards || {};
+  card._confirmCards[ev.stage] = row;
+
+  let remaining = 60;
+  const countdownEl = row.querySelector('.countdown-num');
+  const interval = setInterval(() => {
+    remaining--;
+    if (countdownEl) countdownEl.textContent = remaining;
+    if (remaining <= 0) {
+      clearInterval(interval);
+      const cd = row.querySelector('.dedup-countdown');
+      if (cd) { cd.className = 'dedup-countdown expired'; cd.textContent = 'Timed out — reprocessing'; }
+    }
+  }, 1000);
+  row._dedupInterval = interval;
+}
+
+async function sendDedupAction(confirmToken, action, btn) {
+  const row = btn.closest('.dedup-confirm-card');
+  row.querySelectorAll('.dedup-btn').forEach(b => { b.disabled = true; });
+  clearInterval(row._dedupInterval);
+
+  try {
+    const res = await fetch('/upload/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm_token: confirmToken, action }),
+    });
+    if (!res.ok) {
+      const data = await safeJson(res);
+      toast(data?.detail || 'Confirmation failed', 'error');
+    } else {
+      row.remove();
+    }
+  } catch (e) {
+    toast(e.message, 'error');
   }
 }
 
@@ -306,7 +456,11 @@ async function processFiles() {
   state.files.forEach(f => form.append('files', f));
 
   try {
-    const res = await fetch('/upload/files', { method: 'POST', body: form });
+    const res = await fetch('/upload/files', {
+      method: 'POST',
+      body: form,
+      headers: { 'X-Client-Token': state.clientToken || 'anonymous' },
+    });
     if (!res.ok) {
       const data = await safeJson(res);
       throw new Error(data?.detail || `Server error ${res.status}`);
@@ -382,7 +536,10 @@ async function sendMessage() {
   try {
     const res  = await fetch('/chat/', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type':    'application/json',
+        'X-Advanced-Mode': state.advancedMode ? 'true' : 'false',
+      },
       body: JSON.stringify({ session_id: state.sessionId, question }),
     });
     const data = await safeJson(res);

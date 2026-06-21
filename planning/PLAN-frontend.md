@@ -1,59 +1,61 @@
 # Frontend Plan — HTML/JS → React
 
-## Decision
-We are NOT using Streamlit. It cannot serve as an API and is not suitable
-for a production chatbot.
+---
+
+## Stage A — Plain HTML + CSS + Vanilla JS ✅ Done
+
+FastAPI serves the frontend directly from `app/static/`. No build tools, no npm.
+
+### What's Built
+```
+app/static/
+├── index.html    # Shell — loads CSS, JS, marked.js for markdown
+├── style.css     # Full UI styling — chat bubbles, tabs, progress cards, toasts
+└── chat.js       # All frontend logic
+```
+
+### Features
+| Feature | Status |
+|---|---|
+| Tabs — Files / URL / API | ✅ Done |
+| Drag & drop file upload | ✅ Done |
+| File validation (type, size, count) | ✅ Done |
+| SSE streaming progress cards with live timers | ✅ Done |
+| Chat UI with markdown rendering (marked.js) | ✅ Done |
+| Citations toggle — source, chunk, page number, confidence | ✅ Done |
+| Copy answer button | ✅ Done |
+| Toast notifications | ✅ Done |
+| Session badge + reset button | ✅ Done |
+| API headers panel (add/remove key-value rows) | ✅ Done |
+| Auto-resize textarea | ✅ Done |
+| Typing indicator | ✅ Done |
+
+### How Citations Appear
+Each answer shows expandable sources:
+```
+▶ report.pdf — Chunk #7 — Page 3 — Confidence 98.1% — "preview text..."
+```
+
+### Limits (controlled via .env — no code change needed)
+```
+MAX_FILES_PER_SESSION = 3
+MAX_FILE_SIZE_MB      = 15
+ALLOWED               = .pdf, .doc, .docx, .txt
+```
 
 ---
 
-## Stage A — Plain HTML + CSS + JavaScript
+## Phase 6 — Stage B: React + Tailwind + Vite 📋 Planned
 
-**When:** Phase 3, built alongside the FastAPI backend.
+**When:** After Stage A is stable and the UI needs to grow — components, routing, auth pages.
 
-**Why start here:**
-- Zero build tools, zero npm, zero setup
-- FastAPI serves the HTML file directly — one command runs everything
-- Backend can be tested and validated before investing in React
+### Why React
+- Reusable components (ChatBubble, FileUpload, CitationCard)
+- Tailwind for fast styling
+- Vite for fast builds
+- Mobile responsive layouts
 
-**Folder structure:**
-```
-app/
-└── static/
-    ├── index.html    # Chat UI
-    ├── style.css     # Styling
-    └── chat.js       # fetch() calls to POST /chat and POST /upload
-```
-
-**FastAPI mounts it with one line:**
-```python
-app.mount("/", StaticFiles(directory="app/static", html=True), name="static")
-```
-
-**User opens:** `http://localhost:8001` — sees the chat UI.
-
-**What the UI does:**
-- File upload (drag and drop or button) → calls `POST /upload`
-- Chat input → calls `POST /chat` with session_id + question
-- Displays responses in a chat bubble layout
-
-**Run command (everything, one command):**
-```bash
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
-```
-
----
-
-## Stage B — React + Tailwind CSS + Vite
-
-**When:** After Stage A is working and UI needs to grow (components, routing, auth).
-
-**Why React:**
-- Industry standard — every developer knows it
-- Reusable components (ChatBubble, FileUpload, MessageList)
-- Tailwind for fast, clean styling
-- Vite for fast builds (much faster than Create React App)
-
-**Folder structure:**
+### Planned Folder Structure
 ```
 frontend/
 ├── src/
@@ -61,6 +63,7 @@ frontend/
 │   ├── components/
 │   │   ├── ChatWindow.tsx
 │   │   ├── MessageBubble.tsx
+│   │   ├── CitationCard.tsx
 │   │   └── FileUpload.tsx
 │   └── api/
 │       └── client.ts       # all fetch() calls to FastAPI
@@ -68,25 +71,16 @@ frontend/
 └── vite.config.ts
 ```
 
-**How many commands to run:**
+### Run Commands
+| Mode | Command |
+|---|---|
+| Stage A (current) | `uv run uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload` |
+| Stage B dev | `make dev` — starts FastAPI + Vite together |
+| Stage B production | `npm run build` → outputs to `app/static/` → FastAPI serves it |
 
-| Situation | Commands | Detail |
-|---|---|---|
-| Stage A, any env | **1** | FastAPI serves static files directly |
-| Stage B, development | **1** | `make dev` — Makefile starts both together |
-| Stage B, Docker / AWS | **1** | React pre-built into `app/static/`, FastAPI serves it |
-
-**Makefile for development (1 command):**
-```makefile
-dev:
-    uv run uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload &
-    cd frontend && npm run dev
-```
-
-**Production build flow:**
-```bash
-cd frontend && npm run build   # outputs to app/static/
-docker build -t rag-assistant .  # FastAPI serves the built files
-```
-
-**Bottom line:** Always one command, whether running locally or on AWS.
+### New Features Planned for Stage B
+- Mobile responsive layout
+- Dark mode toggle
+- Session history sidebar (past conversations)
+- Multi-document comparison view
+- Highlighted page citations (click citation → highlight page in PDF viewer)

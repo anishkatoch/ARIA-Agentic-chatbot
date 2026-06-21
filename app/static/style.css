@@ -70,6 +70,95 @@ html, body {
   background-clip: text;
 }
 
+/* ── Full-page drag overlay ──────────────────────────────────── */
+.drag-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  background: rgba(102, 126, 234, 0.15);
+  backdrop-filter: blur(4px);
+  border: 3px dashed var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+
+.drag-overlay.hidden { display: none; }
+
+.drag-overlay-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  color: var(--accent);
+  font-size: 22px;
+  font-weight: 600;
+}
+
+/* ── Advanced Mode Toggle ────────────────────────────────────── */
+.advanced-toggle-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 16px;
+}
+
+.advanced-label-text {
+  font-size: 12px;
+  color: var(--text-muted, #94a3b8);
+  white-space: nowrap;
+  transition: color 0.2s;
+}
+
+.advanced-toggle-label {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  cursor: pointer;
+}
+
+.advanced-toggle-label input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.advanced-toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: #334155;
+  border-radius: 20px;
+  transition: background 0.2s;
+}
+
+.advanced-toggle-slider::before {
+  content: '';
+  position: absolute;
+  height: 14px;
+  width: 14px;
+  left: 3px;
+  bottom: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+
+.advanced-toggle-label input:checked + .advanced-toggle-slider {
+  background: var(--gradient, linear-gradient(135deg, #667eea, #764ba2));
+}
+
+.advanced-toggle-label input:checked + .advanced-toggle-slider::before {
+  transform: translateX(16px);
+}
+
+.advanced-toggle-label input:checked ~ .advanced-label-text,
+.advanced-toggle-wrap:has(input:checked) .advanced-label-text {
+  color: #a78bfa;
+}
+
 .session-badge {
   display: flex;
   align-items: center;
@@ -198,6 +287,9 @@ html, body {
 }
 
 .drop-zone.dragover { transform: scale(1.01); }
+
+.drop-zone * { pointer-events: none; }
+.drop-zone .browse-btn { pointer-events: auto; }
 
 .drop-icon {
   color: var(--text-subtle);
@@ -786,6 +878,7 @@ html, body {
   opacity: 0.7;
 }
 
+
 /* ── Progress Card ───────────────────────────────────────────── */
 .progress-card {
   padding: 16px 20px;
@@ -829,6 +922,8 @@ html, body {
 .ps-label {
   color: var(--text-secondary);
   transition: color 0.2s;
+  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
 .ps-timer {
@@ -880,13 +975,96 @@ html, body {
   align-items: center;
   gap: 8px;
 }
-.progress-total::before { content: '⚡'; }
+.progress-total::before { content: ''; }
 .progress-total.error { color: #f87171; }
 .progress-total.error::before { content: ''; }
 
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* ── Dedup confirm card ──────────────────────────────────────── */
+.dedup-confirm-card {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  margin: 0;
+  background: rgba(102, 126, 234, 0.07);
+  border: 1px solid rgba(102, 126, 234, 0.35);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.dedup-title {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 3px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dedup-meta {
+  display: block;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin: 0 0 8px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dedup-buttons {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.dedup-btn {
+  flex: 1;
+  padding: 6px 10px;
+  border-radius: 3px;
+  border: none;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.dedup-btn:disabled { opacity: 0.45; cursor: default; }
+.dedup-btn.reuse { background: #4ade80; color: #0f172a; }
+.dedup-btn.reuse:hover:not(:disabled) { opacity: 0.85; }
+.dedup-btn.reprocess { background: rgba(102,126,234,0.2); color: #a5b4fc; }
+.dedup-btn.reprocess:hover:not(:disabled) { background: rgba(102,126,234,0.35); }
+.dedup-countdown {
+  display: block;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.dedup-countdown.expired { color: #f87171; }
+
+/* ── Session size indicator ──────────────────────────────────── */
+.session-size-bar {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.session-size-bar .bar-track {
+  flex: 1;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.session-size-bar .bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: #667eea;
+  transition: width 0.3s;
+}
+.session-size-bar .bar-fill.warn { background: #f59e0b; }
+.session-size-bar .bar-fill.danger { background: #f87171; }
 
 /* ── Citations ───────────────────────────────────────────────── */
 .citations-block {

@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>RAG Data Assistant</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
@@ -14,6 +15,14 @@
   <!-- Toast container -->
   <div id="toast-container"></div>
 
+  <!-- Full-page drag overlay -->
+  <div id="drag-overlay" class="drag-overlay hidden">
+    <div class="drag-overlay-inner">
+      <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      <p>Drop your files anywhere</p>
+    </div>
+  </div>
+
   <!-- Header -->
   <header class="header">
     <div class="header-left">
@@ -23,6 +32,13 @@
       </div>
     </div>
     <div class="header-right">
+      <div class="advanced-toggle-wrap">
+        <label class="advanced-toggle-label" for="advanced-toggle">
+          <input type="checkbox" id="advanced-toggle" />
+          <span class="advanced-toggle-slider"></span>
+        </label>
+        <span id="advanced-label" class="advanced-label-text">Advanced Mode: OFF</span>
+      </div>
       <div id="session-badge" class="session-badge hidden">
         <span class="session-dot"></span>
         <span id="session-label">Session Active</span>

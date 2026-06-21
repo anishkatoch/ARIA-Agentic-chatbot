@@ -6,10 +6,9 @@ import httpx
 from liteparse import LiteParse
 from playwright.async_api import async_playwright
 
-logger = logging.getLogger(__name__)
+from app.config import cfg
 
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", 15))
-MAX_FILES_PER_SESSION = int(os.getenv("MAX_FILES_PER_SESSION", 3))
+logger = logging.getLogger(__name__)
 
 _parser = LiteParse()
 
@@ -36,15 +35,15 @@ async def parse_file(content: bytes, filename: str) -> tuple[str, list[dict]]:
         tmp_path = tmp.name
     try:
         result = _parser.parse(tmp_path)
-        full_text = ""
+        full_text  = ""
         page_spans = []
         for page in result.pages:
             start = len(full_text)
             page_spans.append({
                 "page_number": page.page_num,
-                "start": start,
-                "end": start + len(page.text),
-                "confidence": _avg_confidence(page),
+                "start":       start,
+                "end":         start + len(page.text),
+                "confidence":  _avg_confidence(page),
             })
             full_text += page.text + "\n"
         logger.info(f"[PARSE] Done (LiteParse) — pages={len(page_spans)}, chars={len(full_text)}, time={time.time()-t0:.2f}s")
@@ -75,7 +74,7 @@ async def _scrape_with_playwright(url: str, t0: float = None) -> str:
     logger.info(f"[SCRAPE] Playwright launching — url={url}")
     async with async_playwright() as p:
         browser = await p.chromium.launch()
-        page = await browser.new_page()
+        page    = await browser.new_page()
         await page.goto(url, wait_until="networkidle")
         content = await page.inner_text("body")
         await browser.close()

@@ -1,31 +1,50 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
-from typing import Generator
-from urllib.parse import quote_plus
-from dotenv import load_dotenv
-import os
+import logging
 
-load_dotenv()
+from app.config import cfg
 
+logger = logging.getLogger(__name__)
 
-def build_database_url() -> str:
-    host     = os.getenv("DB_HOST")
-    port     = os.getenv("DB_PORT", "5432")
-    user     = quote_plus(os.getenv("DB_USER", ""))
-    password = quote_plus(os.getenv("DB_PASSWORD", ""))  # handles special chars like @, #, $
-    name     = os.getenv("DB_NAME")
-    return f"postgresql://{user}:{password}@{host}:{port}/{name}"
+_engine = None
+_SessionLocal = None
 
 
-DATABASE_URL = build_database_url()
+def get_engine():
+    global _engine
+    if _engine is None:
+        url = cfg.db_url
+        if url is None:
+            return None
+        try:
+            from sqlalchemy import create_engine
+            _engine = create_engine(url, pool_pre_ping=True)
+            logger.info("[DB] Engine created")
+        except Exception as e:
+            logger.warning(f"[DB] Engine creation failed: {e}")
+            _engine = None
+    return _engine
 
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+def get_session_factory():
+    global _SessionLocal
+    if _SessionLocal is None:
+        engine = get_engine()
+        if engine is None:
+            return None
+        from sqlalchemy.orm import sessionmaker
+        _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    return _SessionLocal
 
 
-def get_db() -> Generator[Session, None, None]:
-    db = SessionLocal()
+def get_db():
+    factory = get_session_factory()
+    if factory is None:
+        return None
+    db = factory()
     try:
         yield db
     finally:
         db.close()
+
+
+def is_db_available() -> bool:
+    return get_engine() is not None
