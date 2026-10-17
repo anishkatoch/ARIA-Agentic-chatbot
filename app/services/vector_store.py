@@ -1,4 +1,5 @@
 import logging
+from langchain_core.embeddings import Embeddings
 from langchain_openai import OpenAIEmbeddings
 from langchain_postgres.vectorstores import PGVector
 from langchain_chroma import Chroma
@@ -49,16 +50,63 @@ def _try_openai():
         return None
 
 
+class _DynamicVoyageEmbeddings(Embeddings):
+    """Voyage embeddings that automatically switch to the next model in
+    cfg.voyage_models once the active one's free quota is exhausted (tracked
+    in the embedding_model_usage DB table) or a call against it fails
+    outright. All configured models are forced to the same output dimension
+    so switching never produces vectors incompatible with what's already
+    stored in the vector store."""
+
+    def __init__(self, models: list[dict]):
+        self._models = models or [{"model": cfg.voyage_model_id, "free_tokens": None}]
+
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        from app.services.embedding_usage import pick_active_model, record_usage, mark_exhausted, mark_broken
+        import voyageai
+
+        client = voyageai.Client(api_key=cfg.voyage_api_key)
+        tried: set[str] = set()
+        last_exc: Exception | None = None
+
+        while True:
+            model = pick_active_model(self._models, provider="voyage")
+            if model is None or model in tried:
+                break
+            tried.add(model)
+            try:
+                result = client.embed(texts, model=model, output_dimension=cfg.voyage_output_dimension)
+                record_usage(model, result.total_tokens, provider="voyage")
+                return result.embeddings
+            except Exception as e:
+                last_exc = e
+                err = str(e).lower()
+                if any(s in err for s in ("credit", "402", "payment", "quota")):
+                    mark_exhausted(model, provider="voyage")
+                else:
+                    mark_broken(model, str(e), provider="voyage")
+                logger.warning(f"[EMBED] Voyage model {model} failed ({e}), trying next")
+
+        raise RuntimeError(f"All configured Voyage models exhausted or unavailable. Last error: {last_exc}")
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed([text])[0]
+
+
 def _try_voyage():
     try:
         if not cfg.voyage_api_key:
             raise ValueError("VOYAGE_API_KEY not set")
-        from langchain_voyageai import VoyageAIEmbeddings
-        embeddings = VoyageAIEmbeddings(
-            model=cfg.voyage_model_id,
-            voyage_api_key=cfg.voyage_api_key,
-        )
-        logger.info(f"[EMBED] Using {cfg.voyage_model_id} (Voyage AI, {cfg.embedding_dim} dims)")
+        from app.services.embedding_usage import pick_active_model
+        models = cfg.voyage_models or [{"model": cfg.voyage_model_id, "free_tokens": None}]
+        active = pick_active_model(models, provider="voyage")
+        if active is None:
+            raise RuntimeError("All configured Voyage models have exhausted their free quota or are broken")
+        embeddings = _DynamicVoyageEmbeddings(models)
+        logger.info(f"[EMBED] Using Voyage AI — active model: {active} ({cfg.voyage_output_dimension} dims, auto-fallback across {[m['model'] for m in models]})")
         return embeddings
     except Exception as e:
         logger.warning(f"[EMBED] Voyage unavailable ({e})")

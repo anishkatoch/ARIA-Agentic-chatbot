@@ -115,9 +115,15 @@ def _cache_put(key: str, value):
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
-def _is_rate_limit(e: Exception) -> bool:
+def _is_retryable_model_error(e: Exception) -> bool:
+    """True if the next fallback model should be tried — rate limits, and also
+    a model being decommissioned/renamed/inaccessible (404 model_not_found),
+    which otherwise would abort the whole fallback chain on the first hit."""
     err = str(e).lower()
-    return "429" in err or "rate limit" in err or "rate_limit" in err or "too many requests" in err
+    return (
+        "429" in err or "rate limit" in err or "rate_limit" in err or "too many requests" in err
+        or "404" in err or "model_not_found" in err or "does not exist" in err or "decommissioned" in err
+    )
 
 
 def _openai_llm():
@@ -162,8 +168,8 @@ def llm_invoke(messages: list) -> object:
                 logger.info(f"[LLM] Using Groq fallback model: {model}")
             return result
         except Exception as e:
-            if _is_rate_limit(e):
-                logger.warning(f"[LLM] Groq model {model} rate-limited, trying next")
+            if _is_retryable_model_error(e):
+                logger.warning(f"[LLM] Groq model {model} unavailable ({e}), trying next")
                 last_exc = e
             else:
                 raise
@@ -184,8 +190,8 @@ def chain_invoke(prompt, input_dict: dict) -> str:
                 logger.info(f"[LLM] Using Groq fallback model: {model}")
             return result
         except Exception as e:
-            if _is_rate_limit(e):
-                logger.warning(f"[LLM] Groq model {model} rate-limited, trying next")
+            if _is_retryable_model_error(e):
+                logger.warning(f"[LLM] Groq model {model} unavailable ({e}), trying next")
                 last_exc = e
             else:
                 raise

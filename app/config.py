@@ -42,6 +42,8 @@ class _Config:
         self.hf_model_id: str        = emb.get("bge_model_id", "BAAI/bge-large-en-v1.5")
         self.openai_embed_model: str = emb.get("openai_model", "text-embedding-3-small")
         self.voyage_model_id: str    = emb.get("voyage_model_id", "voyage-3.5-lite")
+        self.voyage_models: list     = emb.get("voyage_models", [])  # priority-ordered fallback chain with free_tokens caps
+        self.voyage_output_dimension: int = int(emb.get("voyage_output_dimension", 1024))
         self.embedding_dim: int      = int(emb.get("dimension", 1024))
 
         # ── Retrieval ─────────────────────────────────────────────

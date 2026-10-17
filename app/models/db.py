@@ -64,3 +64,18 @@ class ChatHistory(Base):
     role       = Column(String, nullable=False)   # "user" | "assistant"
     message    = Column(Text, nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class EmbeddingModelUsage(Base):
+    """Cumulative token usage per embedding model — lets the app auto-switch
+    to the next model in the priority list once a model's free quota is used
+    up, or once it's been marked broken after a failed call."""
+    __tablename__ = "embedding_model_usage"
+
+    model       = Column(String, primary_key=True)
+    provider    = Column(String, nullable=False, default="voyage")
+    tokens_used = Column(BigInteger, nullable=False, default=0)
+    status      = Column(String, nullable=False, default="active")  # active | exhausted | broken
+    last_error  = Column(Text, nullable=True)
+    updated_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                          onupdate=lambda: datetime.now(timezone.utc))

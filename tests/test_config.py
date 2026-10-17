@@ -13,16 +13,16 @@ class TestYamlSettings:
         assert cfg.port == 8001
 
     def test_groq_model(self):
-        assert cfg.groq_model == "llama-3.1-8b-instant"
+        assert cfg.groq_model == "openai/gpt-oss-20b"
 
     def test_embedding_provider(self):
-        assert cfg.embedding_provider == "bge"
+        assert cfg.embedding_provider == "voyage"
 
     def test_embedding_dim(self):
         assert cfg.embedding_dim == 1024
 
     def test_hf_model_id(self):
-        assert "bge" in cfg.hf_model_id.lower()
+        assert "minilm" in cfg.hf_model_id.lower()
 
     def test_retrieval_k(self):
         assert cfg.retrieval_k == 3

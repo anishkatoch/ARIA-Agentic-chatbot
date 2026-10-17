@@ -3,13 +3,11 @@ app:
 
 llm:
   provider: groq                          # groq | openai
-  groq_model: llama-3.1-8b-instant       # primary model — fast, 500K tokens/day
-  intent_model: llama-3.1-8b-instant     # fast model for YES/NO intent check — keeps latency low
-  groq_fallback_models:                  # tried in order when primary is rate-limited
-    - llama-3.3-70b-versatile            # 100K tokens/day — high quality
-    - llama3-8b-8192                     # 500K tokens/day — fast
-    - gemma2-9b-it                       # 500K tokens/day — fast
-    - llama3-70b-8192                    # 100K tokens/day — best quality among fallbacks
+  groq_model: openai/gpt-oss-20b         # primary model — fast (confirmed available on this account)
+  intent_model: openai/gpt-oss-20b       # fast model for YES/NO intent check — keeps latency low
+  groq_fallback_models:                  # tried in order when primary fails
+    - qwen/qwen3.8-27b                   # mid-size fallback
+    - openai/gpt-oss-120b                 # largest/highest quality fallback
   openai_model: gpt-4o-mini              # last resort — only used if all Groq models exhausted
   openai_fallback_enabled: true          # true = fall back to OpenAI after all Groq models fail; false = raise error
 
@@ -17,8 +15,26 @@ embeddings:
   provider: voyage                       # bge | openai | voyage
   bge_model_id: sentence-transformers/all-MiniLM-L6-v2  # via HuggingFace Inference API
   openai_model: text-embedding-3-small
-  voyage_model_id: voyage-3.5-lite       # via Voyage AI API
-  dimension: 1024                        # voyage-3.5-lite=1024 (confirmed live)  MiniLM-L6-v2=384  bge-large=1024  openai=1536 — must match provider
+  voyage_model_id: voyage-4-lite         # used if voyage_models list below is empty
+  # Priority-ordered fallback chain for Voyage: once a model's free monthly
+  # token quota is used up (tracked in the embedding_model_usage DB table),
+  # or a call against it fails outright, the app automatically moves to the
+  # next one. All four are forced to the same output dimension (below) so
+  # switching never breaks the vector store. free_tokens figures are Voyage's
+  # published free-tier allowance per model (confirmed live against the API
+  # on 2026-10-18 — recheck https://docs.voyageai.com/docs/pricing if models
+  # or allowances change).
+  voyage_models:
+    - model: voyage-4-lite
+      free_tokens: 200000000
+    - model: voyage-4
+      free_tokens: 200000000
+    - model: voyage-4-large
+      free_tokens: 200000000
+    - model: voyage-code-4
+      free_tokens: 200000000
+  voyage_output_dimension: 1024          # forced on every voyage model above via the API's output_dimension param
+  dimension: 1024                        # voyage (forced)=1024  MiniLM-L6-v2=384  bge-large=1024  openai=1536 — must match provider
 
 retrieval:
   k: 3              # chunks returned to LLM (more = richer context, slower)
