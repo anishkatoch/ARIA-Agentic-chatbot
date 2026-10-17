@@ -77,17 +77,13 @@ async def _warmup_bm25():
 
 
 async def _warmup_reranker():
-    """Make a dummy reranker call so the HF InferenceClient connection is established."""
+    """Make a dummy reranker call so the active reranker provider's connection
+    is established. Reuses rag._rerank() (not a second hand-rolled call) so
+    this warmup can't drift out of sync with the real reranking code path."""
     try:
-        from huggingface_hub import InferenceClient
-        from app.config import cfg
-        client = InferenceClient(token=cfg.hf_api_key)
-        await asyncio.to_thread(
-            client.sentence_similarity,
-            "warmup query",
-            ["warmup passage"],
-            cfg.hf_model_id,
-        )
+        from app.services.rag import _rerank
+        from langchain_core.documents import Document
+        await asyncio.to_thread(_rerank, "warmup query", [Document(page_content="warmup passage")], 1)
         logger.info("[WARMUP] Reranker ready")
     except Exception as e:
         logger.warning(f"[WARMUP] Reranker warmup failed: {e}")

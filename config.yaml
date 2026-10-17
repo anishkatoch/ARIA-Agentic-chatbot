@@ -42,7 +42,10 @@ retrieval:
   lambda_mult: 0.7  # 1.0=pure similarity  0.0=pure diversity  0.7=balanced
   hybrid_top_k: 7   # top-k from BM25 and MMR each before RRF merge
   rerank_top_n: 5   # top-n chunks after reranking sent to LLM
-  reranker_model: BAAI/bge-reranker-large  # HuggingFace reranker model
+  # Reranking tries Cohere first (if COHERE_API_KEY is set), then falls back
+  # to the HuggingFace sentence-similarity reranker, then to no reranking at all.
+  cohere_rerank_model: rerank-v3.5          # Cohere reranker (confirmed live against docs.cohere.com on 2026-10-18)
+  reranker_model: BAAI/bge-reranker-large  # HuggingFace fallback reranker model
 
 limits:
   max_file_size_mb: 15      # per-file cap

@@ -280,9 +280,28 @@ def _bm25_search(vectorstore, session_id: str, query: str, top_k: int) -> list:
 
 # ── Reranker ──────────────────────────────────────────────────────────────────
 
-def _rerank(question: str, docs: list, top_n: int) -> list:
-    if not docs:
-        return docs
+def _rerank_cohere(question: str, docs: list, top_n: int) -> list | None:
+    if not cfg.cohere_api_key:
+        return None
+    try:
+        import cohere
+        client = cohere.ClientV2(api_key=cfg.cohere_api_key)
+        passages = [doc.page_content for doc in docs]
+        result = client.rerank(
+            model=cfg.cohere_rerank_model,
+            query=question,
+            documents=passages,
+            top_n=min(top_n, len(passages)),
+        )
+        reranked = [docs[r.index] for r in result.results]
+        logger.info(f"[RERANK] {len(docs)} → top {len(reranked)} after reranking (Cohere {cfg.cohere_rerank_model})")
+        return reranked
+    except Exception as e:
+        logger.warning(f"[RERANK] Cohere unavailable ({e}), falling back to HF reranker")
+        return None
+
+
+def _rerank_hf(question: str, docs: list, top_n: int) -> list | None:
     try:
         from huggingface_hub import InferenceClient
         client = InferenceClient(token=cfg.hf_api_key)
@@ -299,8 +318,21 @@ def _rerank(question: str, docs: list, top_n: int) -> list:
         logger.info(f"[RERANK] {len(docs)} → top {len(reranked)} after reranking (sentence_similarity)")
         return reranked
     except Exception as e:
-        logger.warning(f"[RERANK] Reranker unavailable ({e}), using RRF top {top_n} directly")
-        return docs[:top_n]
+        logger.warning(f"[RERANK] HF reranker unavailable ({e})")
+        return None
+
+
+def _rerank(question: str, docs: list, top_n: int) -> list:
+    if not docs:
+        return docs
+    reranked = _rerank_cohere(question, docs, top_n)
+    if reranked is not None:
+        return reranked
+    reranked = _rerank_hf(question, docs, top_n)
+    if reranked is not None:
+        return reranked
+    logger.warning(f"[RERANK] All rerankers unavailable, using RRF top {top_n} directly")
+    return docs[:top_n]
 
 
 # ── RRF merge ─────────────────────────────────────────────────────────────────

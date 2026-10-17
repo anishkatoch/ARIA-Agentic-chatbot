@@ -50,6 +50,7 @@ dependencies = [
     "neo4j>=5.0.0",
     "email-validator>=2.0.0",
     "langchain-voyageai>=0.4.1",
+    "cohere>=7.2.0",
 ]
 
 [dependency-groups]

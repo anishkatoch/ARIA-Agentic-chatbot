@@ -53,6 +53,7 @@ class _Config:
         self.hybrid_top_k: int       = int(ret.get("hybrid_top_k", 7))
         self.rerank_top_n: int       = int(ret.get("rerank_top_n", 5))
         self.reranker_model: str     = ret.get("reranker_model", "BAAI/bge-reranker-large")
+        self.cohere_rerank_model: str = ret.get("cohere_rerank_model", "rerank-v3.5")
 
         # ── Limits ────────────────────────────────────────────────
         self.max_file_size_mb: int      = int(lim.get("max_file_size_mb", 15))
@@ -65,6 +66,7 @@ class _Config:
         self.openai_api_key: str  = os.getenv("OPENAI_API_KEY", "")
         self.hf_api_key: str      = os.getenv("HUGGINGFACE_API_KEY", "")
         self.voyage_api_key: str  = os.getenv("VOYAGE_API_KEY", "")
+        self.cohere_api_key: str  = os.getenv("COHERE_API_KEY", "")
 
         self.db_host: str     = os.getenv("DB_HOST", "")
         self.db_port: str     = os.getenv("DB_PORT", "5432")
