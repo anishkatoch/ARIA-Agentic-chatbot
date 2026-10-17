@@ -31,9 +31,12 @@ async def parse_file(content: bytes, filename: str) -> tuple[str, list[dict]]:
         page_spans = [{"page_number": 1, "start": 0, "end": len(text), "confidence": None}]
         return text, page_spans
 
-    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
+    def _write_tmp() -> str:
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp.write(content)
+            return tmp.name
+
+    tmp_path = await asyncio.to_thread(_write_tmp)
     try:
         # Run in thread pool — LiteParse is CPU-bound and would block the event loop
         result = await asyncio.to_thread(_parser.parse, tmp_path)

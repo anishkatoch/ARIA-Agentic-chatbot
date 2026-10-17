@@ -42,14 +42,14 @@
     </div>
     <div class="header-right">
       <div class="advanced-toggle-wrap">
-        <label class="advanced-toggle-label" for="advanced-toggle">
+        <label class="advanced-toggle-label" for="advanced-toggle" aria-label="Advanced mode">
           <input type="checkbox" id="advanced-toggle" />
           <span class="advanced-toggle-slider"></span>
         </label>
         <span id="advanced-label" class="advanced-label-text">Advanced</span>
       </div>
       <div class="thinking-toggle-wrap">
-        <label class="thinking-toggle-label" for="thinking-toggle">
+        <label class="thinking-toggle-label" for="thinking-toggle" aria-label="Thinking mode">
           <input type="checkbox" id="thinking-toggle" />
           <span class="thinking-toggle-slider"></span>
         </label>
@@ -97,7 +97,7 @@
           Up to 3 files · Max 15 MB · PDF, DOC, DOCX, TXT
         </div>
         <div class="drop-zone" id="drop-zone">
-          <input type="file" id="file-input" multiple accept=".pdf,.doc,.docx,.txt" hidden />
+          <input type="file" id="file-input" multiple accept=".pdf,.doc,.docx,.txt" hidden aria-label="Choose files to upload" />
           <div class="drop-icon">
             <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           </div>
@@ -110,14 +110,14 @@
 
       <!-- URL -->
       <div class="tab-panel" id="panel-url">
-        <label class="field-label">Web Page URL</label>
+        <label class="field-label" for="url-input">Web Page URL</label>
         <input type="url" id="url-input" class="text-input" placeholder="https://example.com/article" />
         <p class="field-hint">Works with any web page including JavaScript-rendered sites.</p>
       </div>
 
       <!-- API -->
       <div class="tab-panel" id="panel-api">
-        <label class="field-label">API Endpoint URL</label>
+        <label class="field-label" for="api-url-input">API Endpoint URL</label>
         <input type="url" id="api-url-input" class="text-input" placeholder="https://api.example.com/data" />
         <button class="toggle-headers-btn" id="toggle-headers">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
@@ -126,8 +126,8 @@
         <div id="headers-panel" class="headers-panel hidden">
           <div id="headers-list">
             <div class="header-row">
-              <input type="text" class="header-key" placeholder="Key (e.g. Authorization)" />
-              <input type="text" class="header-val" placeholder="Value (e.g. Bearer token)" />
+              <input type="text" class="header-key" placeholder="Key (e.g. Authorization)" aria-label="Header key" />
+              <input type="text" class="header-val" placeholder="Value (e.g. Bearer token)" aria-label="Header value" />
               <button class="remove-row" onclick="removeHeaderRow(this)">×</button>
             </div>
           </div>
@@ -181,6 +181,7 @@
           id="chat-input"
           class="chat-input"
           placeholder="Ask ARIA anything... (upload your own data or try the sample)"
+          aria-label="Chat message"
           rows="1"
           onInput="autoResize(this)"
           onKeydown="handleKey(event)"

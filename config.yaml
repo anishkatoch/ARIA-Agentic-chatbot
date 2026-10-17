@@ -14,10 +14,11 @@ llm:
   openai_fallback_enabled: true          # true = fall back to OpenAI after all Groq models fail; false = raise error
 
 embeddings:
-  provider: bge                          # bge | openai
-  bge_model_id: BAAI/bge-large-en-v1.5  # via HuggingFace Inference API (free)
+  provider: voyage                       # bge | openai | voyage
+  bge_model_id: sentence-transformers/all-MiniLM-L6-v2  # via HuggingFace Inference API
   openai_model: text-embedding-3-small
-  dimension: 1024                        # bge=1024  openai=1536 — must match provider
+  voyage_model_id: voyage-3.5-lite       # via Voyage AI API
+  dimension: 1024                        # voyage-3.5-lite=1024 (confirmed live)  MiniLM-L6-v2=384  bge-large=1024  openai=1536 — must match provider
 
 retrieval:
   k: 3              # chunks returned to LLM (more = richer context, slower)

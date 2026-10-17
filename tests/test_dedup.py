@@ -4,6 +4,7 @@ Covers: hashing, TF-IDF similarity, chunk extraction,
 confirmation gate, and the main check() decision tree.
 """
 import asyncio
+import hashlib
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -26,7 +27,7 @@ from app.services.dedup import (
 
 class TestSha256:
     def test_consistent(self):
-        assert sha256(b"hello world") == sha256(b"hello world")
+        assert sha256(b"hello world") == hashlib.sha256(b"hello world").hexdigest()
 
     def test_unique(self):
         assert sha256(b"hello") != sha256(b"world")
@@ -42,9 +43,9 @@ class TestSha256:
         assert all(c in "0123456789abcdef" for c in result)
 
     def test_known_value_stable_across_calls(self):
-        """Same input always produces the same output."""
-        assert sha256(b"abc") == sha256(b"abc")
-        assert sha256(b"") == sha256(b"")
+        """Wrapper matches the standard library digest, not just itself."""
+        assert sha256(b"abc") == hashlib.sha256(b"abc").hexdigest()
+        assert sha256(b"") == hashlib.sha256(b"").hexdigest()
 
     def test_large_content(self):
         big = b"x" * (5 * 1024 * 1024)  # 5MB

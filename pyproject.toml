@@ -49,6 +49,7 @@ dependencies = [
     "rank-bm25>=0.2.2",
     "neo4j>=5.0.0",
     "email-validator>=2.0.0",
+    "langchain-voyageai>=0.4.1",
 ]
 
 [dependency-groups]

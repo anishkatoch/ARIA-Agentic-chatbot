@@ -96,7 +96,7 @@ _CACHE_MAX  = 256  # max entries before evicting oldest
 
 def _cache_key(session_id: str, question: str, advanced: bool, thinking: bool = False) -> str:
     raw = f"{session_id}|{question.strip().lower()}|{advanced}|{thinking}"
-    return hashlib.md5(raw.encode()).hexdigest()
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 
 def _cache_get(key: str):
@@ -238,7 +238,7 @@ def _get_or_build_bm25(vectorstore, session_id: str):
         metas = data.get("metadatas") or []
         if not docs:
             logger.warning(f"[BM25] No documents found for session={session_id}, skipping BM25")
-            return None, []
+            return None, [], []
 
         tokenized = [d.lower().split() for d in docs]
         bm25 = BM25Okapi(tokenized)
@@ -863,7 +863,7 @@ def _check_ambiguity(
         source_list = "\n".join(f"- {s}" for s in sources)
         history_block = _history_to_str(history) if history else "None"
 
-        llm = get_llm(advanced=False)
+        llm = get_llm()
         prompt = (
             f"A user asked: \"{question}\"\n\n"
             f"The knowledge base contains multiple documents:\n{source_list}\n\n"

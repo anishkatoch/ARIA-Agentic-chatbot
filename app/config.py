@@ -41,6 +41,7 @@ class _Config:
         self.embedding_provider: str = emb.get("provider", "bge")
         self.hf_model_id: str        = emb.get("bge_model_id", "BAAI/bge-large-en-v1.5")
         self.openai_embed_model: str = emb.get("openai_model", "text-embedding-3-small")
+        self.voyage_model_id: str    = emb.get("voyage_model_id", "voyage-3.5-lite")
         self.embedding_dim: int      = int(emb.get("dimension", 1024))
 
         # ── Retrieval ─────────────────────────────────────────────
@@ -61,6 +62,7 @@ class _Config:
         self.groq_api_key: str    = os.getenv("GROQ_API_KEY", "")
         self.openai_api_key: str  = os.getenv("OPENAI_API_KEY", "")
         self.hf_api_key: str      = os.getenv("HUGGINGFACE_API_KEY", "")
+        self.voyage_api_key: str  = os.getenv("VOYAGE_API_KEY", "")
 
         self.db_host: str     = os.getenv("DB_HOST", "")
         self.db_port: str     = os.getenv("DB_PORT", "5432")

@@ -70,6 +70,17 @@ async def _copy_graph_async(old_session_id: str, new_session_id: str):
     except Exception as e:
         logger.warning(f"[GRAPH] copy_graph_session failed: {e}")
 
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro) -> None:
+    """Fire-and-forget a coroutine while keeping a strong reference to the Task,
+    so it isn't garbage-collected mid-flight (asyncio only holds a weak ref)."""
+    task = asyncio.ensure_future(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
 ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt"}
 
 SSE_HEADERS = {
@@ -208,7 +219,7 @@ async def upload_files(
                     elapsed = round(time.time() - t1, 2)
                     logger.info(f"[DEDUP] {filename} → reused, copied {copied} vectors")
                     # Copy Neo4j graph entities from old session to new master session
-                    asyncio.ensure_future(_copy_graph_async(result.session_id, master_session_id))
+                    _spawn_background(_copy_graph_async(result.session_id, master_session_id))
 
                     yield sse({"type": "step", "status": "done", "stage": f"dedup_{i}",
                                "message": f"{filename} — duplicate detected, reusing existing embeddings",
@@ -244,7 +255,13 @@ async def upload_files(
                             })
                             batch_texts.append(chunk)
                         if batch_texts:
-                            _add_texts_batched(master_store, batch_texts, batch_metas)
+                            try:
+                                _add_texts_batched(master_store, batch_texts, batch_metas)
+                            except Exception as e:
+                                logger.error(f"[CHUNK][REUSE] {filename} → embedding failed: {e}")
+                                yield sse({"type": "error", "stage": f"chunk_{i}",
+                                           "message": f"Failed to embed {filename}. Check your embedding provider (e.g. HuggingFace credits) and try again."})
+                                return
                         file_chunks   = len(batch_texts)
                         total_chunks += file_chunks
                         logger.info(f"[CHUNK][REUSE] {filename} → re-embedded {file_chunks} chunks into master session={master_session_id}")
@@ -330,7 +347,13 @@ async def upload_files(
                 })
                 batch_texts.append(chunk)
             if batch_texts:
-                await _add_texts_batched_parallel(master_store, batch_texts, batch_metas)
+                try:
+                    await _add_texts_batched_parallel(master_store, batch_texts, batch_metas)
+                except Exception as e:
+                    logger.error(f"[CHUNK] {filename} → embedding failed: {e}")
+                    yield sse({"type": "error", "stage": stage_ext,
+                               "message": f"Failed to embed {filename}. Check your embedding provider (e.g. HuggingFace credits) and try again."})
+                    return
             file_chunks   = len(batch_texts)
             total_chunks += file_chunks
             elapsed = round(time.time() - t1, 2)
@@ -342,7 +365,7 @@ async def upload_files(
             await asyncio.sleep(0)
 
             # Build Neo4j graph async (doesn't block SSE stream)
-            asyncio.ensure_future(_build_graph_async(batch_texts, master_session_id, filename))
+            _spawn_background(_build_graph_async(batch_texts, master_session_id, filename))
 
             # Mark complete in DB
             db = await asyncio.to_thread(dedup_svc._get_db_session)

@@ -38,8 +38,11 @@ async def _seed_default_session():
             logger.info("[DEFAULT] Sample session already seeded — skipping")
             return
 
-        with open(_SAMPLE_FILE, "r", encoding="utf-8") as f:
-            text = f.read()
+        def _read_sample() -> str:
+            with open(_SAMPLE_FILE, "r", encoding="utf-8") as f:
+                return f.read()
+
+        text = await asyncio.to_thread(_read_sample)
 
         chunks = chunk_text(text)
         store = get_vector_store(DEFAULT_SESSION_ID)

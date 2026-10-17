@@ -153,14 +153,14 @@
         </div>
         <form id="form-signin" onsubmit="handleSignin(event)">
           <div class="field">
-            <label>Email</label>
+            <label for="signin-email">Email</label>
             <div class="input-wrap">
               <svg class="input-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
-              <input type="email" id="signin-email" placeholder="you@example.com" autocomplete="email" required autofocus />
+              <input type="email" id="signin-email" placeholder="you@example.com" autocomplete="email" required />
             </div>
           </div>
           <div class="field">
-            <label>Password</label>
+            <label for="signin-password">Password</label>
             <div class="input-wrap">
               <svg class="input-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
               <input type="password" id="signin-password" placeholder="••••••••" autocomplete="current-password" required />
@@ -186,21 +186,21 @@
         </div>
         <form id="form-signup" onsubmit="handleSignup(event)">
           <div class="field">
-            <label>Full Name</label>
+            <label for="signup-name">Full Name</label>
             <div class="input-wrap">
               <svg class="input-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
               <input type="text" id="signup-name" placeholder="John Doe" autocomplete="name" required />
             </div>
           </div>
           <div class="field">
-            <label>Email</label>
+            <label for="signup-email">Email</label>
             <div class="input-wrap">
               <svg class="input-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
               <input type="email" id="signup-email" placeholder="you@example.com" autocomplete="email" required />
             </div>
           </div>
           <div class="field">
-            <label>Password</label>
+            <label for="signup-password">Password</label>
             <div class="input-wrap">
               <svg class="input-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
               <input type="password" id="signup-password" placeholder="Min 6 characters" autocomplete="new-password" required minlength="6" oninput="checkPasswordStrength(this.value)" />
@@ -234,14 +234,14 @@
         </div>
         <form id="form-guest" onsubmit="handleGuest(event)">
           <div class="field">
-            <label>Your Name</label>
+            <label for="guest-name">Your Name</label>
             <div class="input-wrap">
               <svg class="input-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
               <input type="text" id="guest-name" placeholder="John Doe" required />
             </div>
           </div>
           <div class="field">
-            <label>Email</label>
+            <label for="guest-email">Email</label>
             <div class="input-wrap">
               <svg class="input-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
               <input type="email" id="guest-email" placeholder="you@example.com" required />
@@ -262,12 +262,12 @@
           <p>Enter the 6-digit code sent to <strong id="otp-email-label"></strong></p>
         </div>
         <div class="otp-wrap">
-          <input class="otp-box" type="text" inputmode="numeric" maxlength="1" />
-          <input class="otp-box" type="text" inputmode="numeric" maxlength="1" />
-          <input class="otp-box" type="text" inputmode="numeric" maxlength="1" />
-          <input class="otp-box" type="text" inputmode="numeric" maxlength="1" />
-          <input class="otp-box" type="text" inputmode="numeric" maxlength="1" />
-          <input class="otp-box" type="text" inputmode="numeric" maxlength="1" />
+          <input class="otp-box" id="otp-box-1" type="text" inputmode="numeric" maxlength="1" aria-label="Digit 1 of 6" />
+          <input class="otp-box" id="otp-box-2" type="text" inputmode="numeric" maxlength="1" aria-label="Digit 2 of 6" />
+          <input class="otp-box" id="otp-box-3" type="text" inputmode="numeric" maxlength="1" aria-label="Digit 3 of 6" />
+          <input class="otp-box" id="otp-box-4" type="text" inputmode="numeric" maxlength="1" aria-label="Digit 4 of 6" />
+          <input class="otp-box" id="otp-box-5" type="text" inputmode="numeric" maxlength="1" aria-label="Digit 5 of 6" />
+          <input class="otp-box" id="otp-box-6" type="text" inputmode="numeric" maxlength="1" aria-label="Digit 6 of 6" />
         </div>
         <div id="otp-error" class="form-error hidden"></div>
         <button type="button" class="submit-btn" id="btn-otp" onclick="handleOtp()">
@@ -289,7 +289,7 @@
         </div>
         <form id="form-forgot" onsubmit="handleForgot(event)">
           <div class="field">
-            <label>Email</label>
+            <label for="forgot-email">Email</label>
             <div class="input-wrap">
               <svg class="input-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
               <input type="email" id="forgot-email" placeholder="you@example.com" required />

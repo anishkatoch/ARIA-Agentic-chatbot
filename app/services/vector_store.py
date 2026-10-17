@@ -8,12 +8,18 @@ from app.config import cfg
 logger = logging.getLogger(__name__)
 
 
+_PROVIDERS = {}  # populated below, after each _try_* is defined
+
+
 def get_embeddings():
     logger.info(f"[EMBED] Provider priority: {cfg.embedding_provider}")
-    if cfg.embedding_provider == "bge":
-        return _try_bge() or _try_openai()
-    else:
-        return _try_openai() or _try_bge()
+    primary = _PROVIDERS.get(cfg.embedding_provider, _try_bge)
+    fallbacks = [fn for name, fn in _PROVIDERS.items() if fn is not primary]
+    for try_fn in [primary, *fallbacks]:
+        embeddings = try_fn()
+        if embeddings:
+            return embeddings
+    return None
 
 
 def _try_bge():
@@ -43,6 +49,29 @@ def _try_openai():
         return None
 
 
+def _try_voyage():
+    try:
+        if not cfg.voyage_api_key:
+            raise ValueError("VOYAGE_API_KEY not set")
+        from langchain_voyageai import VoyageAIEmbeddings
+        embeddings = VoyageAIEmbeddings(
+            model=cfg.voyage_model_id,
+            voyage_api_key=cfg.voyage_api_key,
+        )
+        logger.info(f"[EMBED] Using {cfg.voyage_model_id} (Voyage AI, {cfg.embedding_dim} dims)")
+        return embeddings
+    except Exception as e:
+        logger.warning(f"[EMBED] Voyage unavailable ({e})")
+        return None
+
+
+_PROVIDERS = {
+    "bge":    _try_bge,
+    "openai": _try_openai,
+    "voyage": _try_voyage,
+}
+
+
 def session_has_data(session_id: str) -> bool:
     """Return True if the session's vector store has at least one document."""
     try:
@@ -58,7 +87,7 @@ def get_vector_store(session_id: str):
     embeddings = get_embeddings()
     if not embeddings:
         logger.error("[STORE] No embedding provider available")
-        raise RuntimeError("No embedding provider available. Check HUGGINGFACE_API_KEY or OPENAI_API_KEY.")
+        raise RuntimeError("No embedding provider available. Check VOYAGE_API_KEY, HUGGINGFACE_API_KEY, or OPENAI_API_KEY.")
 
     collection = f"session_{session_id}"
 

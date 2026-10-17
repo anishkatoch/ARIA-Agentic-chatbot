@@ -348,8 +348,8 @@ function addHeaderRow() {
   const row = document.createElement('div');
   row.className = 'header-row';
   row.innerHTML = `
-    <input type="text" class="header-key" placeholder="Key (e.g. Authorization)" />
-    <input type="text" class="header-val" placeholder="Value" />
+    <input type="text" class="header-key" placeholder="Key (e.g. Authorization)" aria-label="Header key" />
+    <input type="text" class="header-val" placeholder="Value" aria-label="Header value" />
     <button class="remove-row" onclick="removeHeaderRow(this)">×</button>`;
   document.getElementById('headers-list').appendChild(row);
 }
@@ -450,6 +450,13 @@ async function readSSEStream(response, onEvent) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let sawTerminalEvent = false;
+
+  const wrappedOnEvent = (ev) => {
+    if (ev.type === 'complete' || ev.type === 'error') sawTerminalEvent = true;
+    onEvent(ev);
+  };
+
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -458,9 +465,15 @@ async function readSSEStream(response, onEvent) {
     buffer = lines.pop();
     for (const line of lines) {
       if (line.startsWith('data: ')) {
-        try { onEvent(JSON.parse(line.slice(6))); } catch (_) {}
+        try { wrappedOnEvent(JSON.parse(line.slice(6))); } catch (_) {}
       }
     }
+  }
+
+  if (!sawTerminalEvent) {
+    // Connection closed mid-processing (e.g. an unhandled server error) without
+    // ever sending a complete/error event — surface it instead of hanging silently.
+    onEvent({ type: 'error', message: 'Connection lost while processing. Please try again.' });
   }
 }
 
