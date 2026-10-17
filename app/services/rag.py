@@ -116,13 +116,17 @@ def _cache_put(key: str, value):
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
 def _is_retryable_model_error(e: Exception) -> bool:
-    """True if the next fallback model should be tried — rate limits, and also
-    a model being decommissioned/renamed/inaccessible (404 model_not_found),
-    which otherwise would abort the whole fallback chain on the first hit."""
+    """True if the next fallback model should be tried — rate limits, a model
+    being decommissioned/renamed/inaccessible (404 model_not_found), and a
+    model spontaneously emitting a native tool call against a prompt that
+    only describes tools as plain text (some "agentic" models, e.g. the
+    gpt-oss family, do this even with no tools registered via the API) —
+    any of these would otherwise abort the whole fallback chain on the first hit."""
     err = str(e).lower()
     return (
         "429" in err or "rate limit" in err or "rate_limit" in err or "too many requests" in err
         or "404" in err or "model_not_found" in err or "does not exist" in err or "decommissioned" in err
+        or "tool_use_failed" in err or "tool choice is none" in err
     )
 
 
