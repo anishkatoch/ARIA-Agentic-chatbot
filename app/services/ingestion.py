@@ -12,11 +12,71 @@ from app.config import cfg
 logger = logging.getLogger(__name__)
 
 _parser = LiteParse()
+_docling_converter = None
 
 
 def _avg_confidence(page) -> float | None:
     scores = [item.confidence for item in page.text_items if item.confidence is not None]
     return round(sum(scores) / len(scores), 4) if scores else None
+
+
+def _parse_with_liteparse(tmp_path: str) -> tuple[str, list[dict]]:
+    result = _parser.parse(tmp_path)
+    full_text  = ""
+    page_spans = []
+    for page in result.pages:
+        start = len(full_text)
+        page_spans.append({
+            "page_number": page.page_num,
+            "start":       start,
+            "end":         start + len(page.text),
+            "confidence":  _avg_confidence(page),
+        })
+        full_text += page.text + "\n"
+    if not full_text.strip():
+        raise ValueError("LiteParse returned no extractable text")
+    return full_text, page_spans
+
+
+def _get_docling_converter():
+    # Imported lazily — Docling pulls in heavy ML deps and downloads models
+    # on first use, so we only pay that cost when LiteParse actually fails.
+    global _docling_converter
+    if _docling_converter is None:
+        from docling.document_converter import DocumentConverter
+        _docling_converter = DocumentConverter()
+    return _docling_converter
+
+
+def _docling_page_confidence(report, page_no: int) -> float | None:
+    score = report.pages.get(page_no)
+    if score is None or score.mean_score != score.mean_score:  # NaN check
+        return None
+    return round(float(score.mean_score), 4)
+
+
+def _parse_with_docling(tmp_path: str) -> tuple[str, list[dict]]:
+    converter = _get_docling_converter()
+    result = converter.convert(tmp_path)
+    doc = result.document
+
+    if not result.pages:
+        text = doc.export_to_text()
+        return text, [{"page_number": 1, "start": 0, "end": len(text), "confidence": None}]
+
+    full_text  = ""
+    page_spans = []
+    for page in result.pages:
+        page_text = doc.export_to_text(page_no=page.page_no)
+        start = len(full_text)
+        page_spans.append({
+            "page_number": page.page_no,
+            "start":       start,
+            "end":         start + len(page_text),
+            "confidence":  _docling_page_confidence(result.confidence, page.page_no),
+        })
+        full_text += page_text + "\n"
+    return full_text, page_spans
 
 
 async def parse_file(content: bytes, filename: str) -> tuple[str, list[dict]]:
@@ -38,20 +98,24 @@ async def parse_file(content: bytes, filename: str) -> tuple[str, list[dict]]:
 
     tmp_path = await asyncio.to_thread(_write_tmp)
     try:
-        # Run in thread pool — LiteParse is CPU-bound and would block the event loop
-        result = await asyncio.to_thread(_parser.parse, tmp_path)
-        full_text  = ""
-        page_spans = []
-        for page in result.pages:
-            start = len(full_text)
-            page_spans.append({
-                "page_number": page.page_num,
-                "start":       start,
-                "end":         start + len(page.text),
-                "confidence":  _avg_confidence(page),
-            })
-            full_text += page.text + "\n"
-        logger.info(f"[PARSE] Done (LiteParse) — pages={len(page_spans)}, chars={len(full_text)}, time={time.time()-t0:.2f}s")
+        # Run in thread pool — both parsers are CPU-bound and would block the event loop
+        try:
+            full_text, page_spans = await asyncio.to_thread(_parse_with_liteparse, tmp_path)
+            logger.info(f"[PARSE] Done (LiteParse) — pages={len(page_spans)}, chars={len(full_text)}, time={time.time()-t0:.2f}s")
+            return full_text, page_spans
+        except Exception as liteparse_error:
+            logger.warning(f"[PARSE] LiteParse failed ({liteparse_error}) — falling back to Docling")
+
+        try:
+            full_text, page_spans = await asyncio.to_thread(_parse_with_docling, tmp_path)
+        except Exception as docling_error:
+            logger.error(f"[PARSE] Docling fallback also failed ({docling_error})")
+            raise RuntimeError(
+                f"Failed to parse {filename}: LiteParse and Docling both failed "
+                f"(Docling error: {docling_error})"
+            ) from docling_error
+
+        logger.info(f"[PARSE] Done (Docling fallback) — pages={len(page_spans)}, chars={len(full_text)}, time={time.time()-t0:.2f}s")
         return full_text, page_spans
     finally:
         os.unlink(tmp_path)

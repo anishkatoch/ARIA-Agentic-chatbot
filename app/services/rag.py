@@ -10,8 +10,10 @@ from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import tool
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.graph import StateGraph, END
+from langchain.agents import create_agent
 
 from app.config import cfg
 
@@ -674,6 +676,65 @@ def _get_advanced_graph():
 
 # ── ReAct agent (Thinking Mode) ───────────────────────────────────────────────
 
+def _react_tools(vectorstore, session_id: str, use_graph: bool, clarify_allowed: bool,
+                  collected_docs: list, clarify_holder: dict) -> list:
+    """Build real, API-registered tools for this request. Closures capture
+    per-request state (vectorstore/session) and accumulate retrieved docs
+    for citations, and the clarify answer if the model asks one."""
+
+    @tool
+    def vector_search(query: str) -> str:
+        """Search the uploaded document chunks for information relevant to the query."""
+        docs = _hybrid_retrieve(vectorstore, session_id, [query])
+        if not docs:
+            return "No results found."
+        collected_docs.extend(docs)
+        return "\n\n---\n\n".join(
+            f"[Source: {d.metadata.get('source','?')} p.{d.metadata.get('page_number','?')}]\n{d.page_content}"
+            for d in docs
+        )
+
+    tools = [vector_search]
+
+    if use_graph:
+        @tool
+        def graph_search(query: str) -> str:
+            """Search entity relationships in the knowledge graph for the query."""
+            try:
+                from app.services.graph_store import query_graph
+                result = query_graph(query, session_id)
+                return result if result else "No graph relationships found."
+            except Exception as e:
+                return f"Graph search unavailable: {e}"
+        tools.append(graph_search)
+
+    if clarify_allowed:
+        @tool
+        def clarify(question: str) -> str:
+            """Ask the user ONE short clarification question — ONLY when the query is
+            genuinely ambiguous across multiple documents and you truly cannot determine
+            which document or entity is meant. Use sparingly; prefer answering directly
+            when a reasonable answer is possible."""
+            clarify_holder["question"] = question
+            return "Clarification recorded."
+        tools.append(clarify)
+
+    return tools
+
+
+def _react_llm_with_fallbacks(tools: list):
+    """Same Groq fallback chain as llm_invoke, but using Runnable.with_fallbacks()
+    so a model that errors (rate limit, decommissioned, or spontaneously emitting
+    a native tool call the API rejects) is retried with the next model natively,
+    all while real tool-calling stays bound throughout the chain."""
+    models = _all_groq_models()
+    primary, *rest = [_groq_llm(m).bind_tools(tools) for m in models]
+    fallbacks = list(rest)
+    if cfg.openai_fallback_enabled and cfg.openai_api_key:
+        fallbacks.append(_openai_llm().bind_tools(tools))
+    return primary.with_fallbacks(fallbacks) if fallbacks else primary
+
+
 def _react_answer(
     vectorstore,
     question: str,
@@ -682,136 +743,44 @@ def _react_answer(
     history: list[dict],
     clarify_allowed: bool = True,
 ) -> tuple[str, int, list[dict]]:
-    """ReAct loop: Thought → Action → Observation, up to MAX_STEPS, then Final Answer."""
+    """Real ReAct agent (langchain.agents.create_agent) — native tool calling,
+    not text parsing. Tools: vector_search, graph_search (Advanced), clarify."""
     t0 = time.time()
-    MAX_STEPS = 5
     history_block = f"Conversation so far:\n{_history_to_str(history)}\n\n" if history else ""
 
-    def _do_vector_search(query: str) -> tuple[str, list]:
-        docs = _hybrid_retrieve(vectorstore, session_id, [query])
-        if not docs:
-            return "No results found.", []
-        text = "\n\n---\n\n".join(
-            f"[Source: {d.metadata.get('source','?')} p.{d.metadata.get('page_number','?')}]\n{d.page_content}"
-            for d in docs
-        )
-        return text, docs
+    collected_docs: list = []
+    clarify_holder: dict = {}
+    tools = _react_tools(vectorstore, session_id, use_graph, clarify_allowed, collected_docs, clarify_holder)
 
-    def _do_graph_search(query: str) -> str:
-        try:
-            from app.services.graph_store import query_graph
-            result = query_graph(query, session_id)
-            return result if result else "No graph relationships found."
-        except Exception as e:
-            return f"Graph search unavailable: {e}"
-
-    tools_desc = "Tools available:\n1. vector_search(query) — search document chunks\n"
-    if use_graph:
-        tools_desc += "2. graph_search(query) — search entity relationships in the knowledge graph\n"
-    if clarify_allowed:
-        tools_desc += (
-            "3. clarify(question) — ask the user ONE short clarification question "
-            "ONLY when the query is genuinely ambiguous across multiple documents "
-            "and you truly cannot determine which document or entity is meant. "
-            "Use this sparingly — if you can give a reasonable answer, do so instead.\n"
-        )
-
-    react_system = (
+    system_prompt = (
         f"{_ARIA_SYSTEM}\n\n"
-        f"{tools_desc}\n"
-        "Follow this loop:\n"
-        "Thought: what do I need to find?\n"
-        "Action: vector_search(your query)\n"
-        "Observation: <result>\n"
-        "... repeat if needed ...\n"
-        "Final Answer: your complete answer\n\n"
-        "Rules:\n"
-        "- Always start with Thought:\n"
-        "- Use 'Final Answer:' when you have enough info\n"
-        "- Max 5 search steps then give Final Answer with what you have\n"
-        "- Answer only from Observations, not prior knowledge\n"
-        + (
-            "- Use clarify() ONLY when truly ambiguous across multiple documents — "
-            "never for simple or clearly answerable questions\n"
-            "- clarify() is a terminal action — use it instead of Final Answer, never both\n"
-            if clarify_allowed else ""
-        )
+        "Use the available tools to find information before answering — do not answer "
+        "from prior knowledge. Call vector_search (and graph_search, if available) as "
+        "many times as needed, then give your final answer in plain text. "
+        "If nothing relevant is found after searching, say so honestly."
     )
 
-    messages = [
-        SystemMessage(content=react_system),
-        HumanMessage(content=f"{history_block}Question: {question}\n\nThought:"),
-    ]
+    agent = create_agent(_react_llm_with_fallbacks(tools), tools, system_prompt=system_prompt)
+    messages = [HumanMessage(content=f"{history_block}Question: {question}")]
 
-    all_docs: list = []
+    try:
+        result = agent.invoke({"messages": messages}, config={"recursion_limit": 15})
+    except Exception as e:
+        logger.warning(f"[REACT] agent invocation failed ({e})")
+        elapsed_ms = int((time.time() - t0) * 1000)
+        return "I'm having trouble processing that right now. Please try again.", elapsed_ms, []
 
-    for step in range(MAX_STEPS):
-        response = llm_invoke(messages)
-        text = response.content.strip()
-        logger.info(f"[REACT] step={step+1} → '{text[:120]}'")
+    if clarify_holder:
+        elapsed_ms = int((time.time() - t0) * 1000)
+        logger.info(f"[REACT] clarify() → '{clarify_holder['question'][:80]}'")
+        _clarif_set(session_id, True)
+        return clarify_holder["question"], elapsed_ms, []
 
-        if "Final Answer:" in text:
-            answer = text.split("Final Answer:", 1)[1].strip()
-            elapsed_ms = int((time.time() - t0) * 1000)
-            logger.info(f"[REACT] done in {step+1} steps, {elapsed_ms}ms")
-            return answer, elapsed_ms, _build_citations(all_docs)
-
-        # Parse Action line
-        action_line = ""
-        for line in text.split("\n"):
-            stripped = line.strip()
-            if stripped.lower().startswith("action:"):
-                action_line = stripped[len("action:"):].strip()
-                break
-
-        if not action_line:
-            # LLM gave reasoning but no Action — ask for a clean final answer
-            messages.append(response)
-            messages.append(HumanMessage(content=(
-                "Based on what you've reasoned so far, give your Final Answer now.\nFinal Answer:"
-            )))
-            followup = llm_invoke(messages)
-            answer = followup.content.strip()
-            if answer.lower().startswith("final answer:"):
-                answer = answer[len("final answer:"):].strip()
-            elapsed_ms = int((time.time() - t0) * 1000)
-            logger.info(f"[REACT] no-action fallback, extracted final answer in {elapsed_ms}ms")
-            return answer, elapsed_ms, _build_citations(all_docs)
-
-        # Execute tool
-        if clarify_allowed and action_line.lower().startswith("clarify"):
-            clarification_q = action_line[len("clarify"):].strip().strip("()\"\' ")
-            elapsed_ms = int((time.time() - t0) * 1000)
-            logger.info(f"[REACT] clarify() → '{clarification_q[:80]}'")
-            _clarif_set(session_id, True)
-            return clarification_q, elapsed_ms, []
-
-        elif action_line.lower().startswith("vector_search"):
-            query = action_line[len("vector_search"):].strip().strip("()\"\' ")
-            observation, docs = _do_vector_search(query)
-            all_docs.extend(docs)
-            logger.info(f"[REACT] vector_search('{query[:60]}') → {len(docs)} docs")
-        elif action_line.lower().startswith("graph_search") and use_graph:
-            query = action_line[len("graph_search"):].strip().strip("()\"\' ")
-            observation = _do_graph_search(query)
-            logger.info(f"[REACT] graph_search('{query[:60]}')")
-        else:
-            observation = f"Unknown tool: {action_line}. Use vector_search or graph_search."
-
-        messages.append(response)
-        messages.append(HumanMessage(content=f"Observation: {observation}\n\nThought:"))
-
-    # Max steps hit — force final answer
-    messages.append(HumanMessage(content=(
-        "Maximum steps reached. Give your Final Answer now based on what you found.\nFinal Answer:"
-    )))
-    response = llm_invoke(messages)
-    answer = response.content.strip()
-    if answer.lower().startswith("final answer:"):
-        answer = answer[len("final answer:"):].strip()
+    answer = result["messages"][-1].content
     elapsed_ms = int((time.time() - t0) * 1000)
-    logger.info(f"[REACT] max steps hit, {elapsed_ms}ms")
-    return answer, elapsed_ms, _build_citations(all_docs)
+    tool_calls = sum(1 for m in result["messages"] if getattr(m, "tool_calls", None))
+    logger.info(f"[REACT] done in {elapsed_ms}ms, {tool_calls} tool-call step(s), {len(collected_docs)} docs collected")
+    return answer, elapsed_ms, _build_citations(collected_docs)
 
 
 # ── Query guard (prompt injection + identity) ─────────────────────────────────

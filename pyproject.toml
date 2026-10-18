@@ -19,6 +19,7 @@ dependencies = [
     "chromadb",
     # Document parsing
     "liteparse",
+    "docling>=2.0.0",  # fallback parser when LiteParse fails
     # Web scraping
     "crawl4ai",
     "playwright",

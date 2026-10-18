@@ -174,34 +174,47 @@ class TestCombinedGates:
         assert clarify_allowed is False
 
 
-# ── 5. ReAct Clarify action is terminal ──────────────────────────────────────
+# ── 5. ReAct Clarify tool is terminal ─────────────────────────────────────────
+# The ReAct agent is now a real tool-calling agent (langchain.agents.create_agent),
+# not text parsing — so these tests mock at the create_agent boundary and simulate
+# the model choosing to call the clarify tool, rather than mocking llm_invoke
+# (which _react_answer no longer calls at all).
 
 class TestReActClarifyTerminal:
 
-    def _make_mock_llm_response(self, text: str):
-        msg = MagicMock()
-        msg.content = text
-        return msg
+    def _fake_agent_calling_clarify(self, clarify_text: str):
+        """Returns a stand-in for create_agent() whose .invoke() simulates the
+        model choosing to call the clarify tool with the given question."""
+        def _create_agent(llm, tools, system_prompt=None):
+            class FakeAgent:
+                def invoke(self, input_, config=None):
+                    for t in tools:
+                        if t.name == "clarify":
+                            t.invoke({"question": clarify_text})
+                    from langchain_core.messages import AIMessage
+                    return {"messages": [*input_["messages"], AIMessage(content="(unused)")]}
+            return FakeAgent()
+        return _create_agent
+
+    def _fake_agent_final_answer(self, answer_text: str):
+        """Stand-in for create_agent() that just returns a final answer, no tool calls."""
+        def _create_agent(llm, tools, system_prompt=None):
+            class FakeAgent:
+                def invoke(self, input_, config=None):
+                    from langchain_core.messages import AIMessage
+                    return {"messages": [*input_["messages"], AIMessage(content=answer_text)]}
+            return FakeAgent()
+        return _create_agent
 
     def test_clarify_action_returns_question_immediately(self):
-        """When LLM emits 'Action: clarify(which doc?)', loop stops and returns the question."""
-        from app.services.rag import _react_answer, _clarif_was_asked, _clarif_set
+        """When the model calls the clarify tool, the answer IS the clarification question."""
+        from app.services.rag import _react_answer, _clarif_set
 
         _clarif_set("react-test-1", False)
-
-        docs = [Document(page_content="some content", metadata={"source": "x.pdf", "page_number": 1})]
-
-        llm_response = self._make_mock_llm_response(
-            "Thought: User question is ambiguous across two docs.\n"
-            "Action: clarify(Are you asking about the 2022 report or the 2023 report?)"
-        )
-
         vs = MagicMock()
-        vs.as_retriever.return_value.invoke.return_value = docs
-        vs._collection = MagicMock()
-        vs._collection.get.return_value = {"documents": [], "metadatas": []}
 
-        with patch("app.services.rag.llm_invoke", return_value=llm_response):
+        clarify_q = "Are you asking about the 2022 report or the 2023 report?"
+        with patch("app.services.rag.create_agent", side_effect=self._fake_agent_calling_clarify(clarify_q)):
             answer, elapsed_ms, citations = _react_answer(
                 vectorstore=vs,
                 question="What happened in the report?",
@@ -211,64 +224,45 @@ class TestReActClarifyTerminal:
                 clarify_allowed=True,
             )
 
-        assert "2022" in answer or "2023" in answer, f"Clarification question should be returned, got: {answer}"
+        assert answer == clarify_q, f"Clarification question should be returned verbatim, got: {answer}"
         assert citations == [], "Clarify action should return empty citations"
-        assert elapsed_ms >= 0  # can be 0 in instant mocked calls
+        assert elapsed_ms >= 0
 
     def test_clarify_sets_flag(self):
-        """After clarify() action fires, the session flag must be True."""
+        """After the clarify tool fires, the session flag must be True."""
         from app.services.rag import _react_answer, _clarif_was_asked, _clarif_set
 
         _clarif_set("react-test-2", False)
-
-        docs = [Document(page_content="x", metadata={"source": "a.pdf", "page_number": 1})]
-        llm_response = self._make_mock_llm_response(
-            "Thought: Ambiguous.\nAction: clarify(which file do you mean?)"
-        )
-
         vs = MagicMock()
-        vs.as_retriever.return_value.invoke.return_value = docs
-        vs._collection = MagicMock()
-        vs._collection.get.return_value = {"documents": [], "metadatas": []}
 
-        with patch("app.services.rag.llm_invoke", return_value=llm_response):
+        with patch("app.services.rag.create_agent",
+                   side_effect=self._fake_agent_calling_clarify("which file do you mean?")):
             _react_answer(vs, "test question", "react-test-2", False, [], clarify_allowed=True)
 
         assert _clarif_was_asked("react-test-2") is True, "Flag must be set after clarify() fires"
 
-    def test_clarify_blocked_when_not_allowed(self):
-        """When clarify_allowed=False, clarify() in agent output is treated as unknown tool."""
+    def test_clarify_tool_absent_when_not_allowed(self):
+        """When clarify_allowed=False, the clarify tool must not even be registered —
+        the model has no way to call it, by construction, not by output filtering."""
+        from app.services.rag import _react_tools
+
+        tools = _react_tools(MagicMock(), "react-test-3", use_graph=False, clarify_allowed=False,
+                              collected_docs=[], clarify_holder={})
+        names = [t.name for t in tools]
+        assert "clarify" not in names, "clarify tool must not be registered when clarify_allowed=False"
+
+    def test_final_answer_path_unaffected_when_clarify_not_called(self):
+        """Normal final-answer path still works when the model never calls clarify."""
         from app.services.rag import _react_answer, _clarif_was_asked, _clarif_set
 
-        _clarif_set("react-test-3", False)
-
-        docs = [Document(page_content="content", metadata={"source": "b.pdf", "page_number": 1})]
-
-        # First response: tries clarify (should be blocked)
-        # Second response: final answer
-        llm_clarify = self._make_mock_llm_response(
-            "Thought: Might be ambiguous.\nAction: clarify(which doc?)"
-        )
-        llm_final = self._make_mock_llm_response("Final Answer: Here is the answer.")
-
+        _clarif_set("react-test-4", False)
         vs = MagicMock()
-        vs.as_retriever.return_value.invoke.return_value = docs
-        vs._collection = MagicMock()
-        vs._collection.get.return_value = {"documents": [], "metadatas": []}
 
-        call_count = [0]
-        def fake_llm(messages):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return llm_clarify
-            return llm_final
+        with patch("app.services.rag.create_agent", side_effect=self._fake_agent_final_answer("Here is the answer.")):
+            answer, _, _ = _react_answer(vs, "test", "react-test-4", False, [], clarify_allowed=True)
 
-        with patch("app.services.rag.llm_invoke", side_effect=fake_llm), \
-             patch("app.services.rag._hybrid_retrieve", return_value=docs):
-            answer, _, _ = _react_answer(vs, "test", "react-test-3", False, [], clarify_allowed=False)
-
-        assert _clarif_was_asked("react-test-3") is False, "Flag must NOT be set when clarify is blocked"
         assert "Here is the answer" in answer
+        assert _clarif_was_asked("react-test-4") is False, "Flag must NOT be set when clarify is never called"
 
 
 # ── 6. History saved after clarification ─────────────────────────────────────
@@ -288,18 +282,21 @@ class TestClarifyHistorySaved:
             Document(page_content="doc B content", metadata={"source": "b.pdf", "page_number": 1}),
         ]
 
-        llm_clarify = MagicMock()
-        llm_clarify.content = "Thought: Ambiguous.\nAction: clarify(Are you asking about doc A or doc B?)"
+        clarify_q = "Are you asking about doc A or doc B?"
+
+        def fake_create_agent(llm, tools, system_prompt=None):
+            class FakeAgent:
+                def invoke(self, input_, config=None):
+                    for t in tools:
+                        if t.name == "clarify":
+                            t.invoke({"question": clarify_q})
+                    from langchain_core.messages import AIMessage
+                    return {"messages": [*input_["messages"], AIMessage(content="(unused)")]}
+            return FakeAgent()
 
         vs = MagicMock()
-        vs.as_retriever.return_value.invoke.return_value = docs_multi
-        vs._collection = MagicMock()
-        vs._collection.get.return_value = {
-            "documents": [d.page_content for d in docs_multi],
-            "metadatas": [d.metadata for d in docs_multi],
-        }
 
-        with patch("app.services.rag.llm_invoke", return_value=llm_clarify), \
+        with patch("app.services.rag.create_agent", side_effect=fake_create_agent), \
              patch("app.services.rag._hybrid_retrieve", return_value=docs_multi), \
              patch("app.services.rag.check_intent", return_value=True):
             from app.services.rag import answer_question
@@ -316,7 +313,7 @@ class TestClarifyHistorySaved:
         assert history[0]["role"] == "user"
         assert history[0]["content"] == "What is the summary?"
         assert history[1]["role"] == "assistant"
-        assert "doc A" in history[1]["content"] or "doc B" in history[1]["content"]
+        assert history[1]["content"] == clarify_q
 
 
 # ── 7 & 8. Correction and apology rules in system prompt ─────────────────────
@@ -348,48 +345,34 @@ class TestSystemPromptRules:
             "_ARIA_SYSTEM must say to not apologise repeatedly"
 
 
-# ── 9 & 10. Clarify in ReAct prompt controlled by flag ───────────────────────
+# ── 9 & 10. Clarify tool registration controlled by flag ─────────────────────
+# With real tool-calling, "is clarify in the prompt" is no longer meaningful —
+# tools are registered via the API, not described in text. The equivalent,
+# architecturally correct check is whether the clarify tool is in the tools
+# list build_react_tools() returns, and what its docstring (the model's only
+# view of when to use it) says.
 
 class TestClarifyInPrompt:
 
-    def _get_react_system_prompt(self, clarify_allowed: bool) -> str:
-        """Run one step of _react_answer and capture the system message content."""
-        from app.services.rag import _react_answer
-        captured = []
+    def test_clarify_tool_not_registered_when_disabled(self):
+        from app.services.rag import _react_tools
+        tools = _react_tools(MagicMock(), "prompt-test", use_graph=False, clarify_allowed=False,
+                              collected_docs=[], clarify_holder={})
+        assert "clarify" not in [t.name for t in tools], \
+            "clarify tool must not be registered when clarify_allowed=False"
 
-        docs = [Document(page_content="x", metadata={"source": "a.pdf", "page_number": 1})]
+    def test_clarify_tool_registered_when_enabled(self):
+        from app.services.rag import _react_tools
+        tools = _react_tools(MagicMock(), "prompt-test", use_graph=False, clarify_allowed=True,
+                              collected_docs=[], clarify_holder={})
+        assert "clarify" in [t.name for t in tools], \
+            "clarify tool must be registered when clarify_allowed=True"
 
-        def fake_invoke(messages):
-            captured.extend(messages)
-            msg = MagicMock()
-            msg.content = "Final Answer: done"
-            return msg
-
-        vs = MagicMock()
-        vs.as_retriever.return_value.invoke.return_value = docs
-        vs._collection = MagicMock()
-        vs._collection.get.return_value = {"documents": [], "metadatas": []}
-
-        with patch("app.services.rag.llm_invoke", side_effect=fake_invoke), \
-             patch("app.services.rag._hybrid_retrieve", return_value=docs):
-            _react_answer(vs, "test", "prompt-test", False, [], clarify_allowed=clarify_allowed)
-
-        system_msgs = [m for m in captured if hasattr(m, "content") and "ARIA" in m.content]
-        return system_msgs[0].content if system_msgs else ""
-
-    def test_clarify_tool_not_in_prompt_when_disabled(self):
-        """When disabled, the clarify() tool description must not appear (the word 'clarify'
-        may still exist in _ARIA_SYSTEM's correction rules — we check for 'clarify(' syntax)."""
-        prompt = self._get_react_system_prompt(clarify_allowed=False)
-        assert "clarify(" not in prompt.lower(), \
-            "clarify() tool must not appear in prompt when clarify_allowed=False"
-
-    def test_clarify_tool_in_prompt_when_enabled(self):
-        prompt = self._get_react_system_prompt(clarify_allowed=True)
-        assert "clarify(" in prompt.lower(), \
-            "clarify() tool must appear in prompt when clarify_allowed=True"
-
-    def test_clarify_prompt_says_use_sparingly(self):
-        prompt = self._get_react_system_prompt(clarify_allowed=True)
-        assert "sparingly" in prompt.lower() or "only when" in prompt.lower(), \
-            "Clarify prompt must tell agent to use it sparingly"
+    def test_clarify_tool_description_says_use_sparingly(self):
+        from app.services.rag import _react_tools
+        tools = _react_tools(MagicMock(), "prompt-test", use_graph=False, clarify_allowed=True,
+                              collected_docs=[], clarify_holder={})
+        clarify_tool = next(t for t in tools if t.name == "clarify")
+        desc = clarify_tool.description.lower()
+        assert "sparingly" in desc or "only when" in desc or "ambiguous" in desc, \
+            "clarify tool description must tell the model to use it sparingly"
