@@ -10,3 +10,10 @@ langchain
 langchain-community
 langchain-text-splitters
 tiktoken
+
+# Source-system connectors (CONNECTOR_POC integration)
+requests
+msal
+google-api-python-client
+google-auth
+google-auth-oauthlib

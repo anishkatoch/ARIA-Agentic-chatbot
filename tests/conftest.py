@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture(scope="session")
 def test_app():
-    """Minimal app with only the routers we test — no playwright lifespan."""
+    """Minimal app with only the routers we test - no playwright lifespan."""
     from app.routers import upload, chat
     app = FastAPI()
     app.include_router(upload.router)

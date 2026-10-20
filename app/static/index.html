@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>body{visibility:hidden}</style>
   <script>if(!localStorage.getItem('rag_auth_token')){window.location.replace('/auth.html')}else{document.addEventListener('DOMContentLoaded',function(){document.body.style.visibility='visible'})}</script>
-  <title>ARIA — Chat with your Data</title>
+  <title>ARIA - Chat with your Data</title>
   <link rel="icon" type="image/x-icon" href="/favicon.ico" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
@@ -63,7 +63,7 @@
     </div>
   </header>
 
-  <!-- Hamburger — always visible, outside sidebar -->
+  <!-- Hamburger - always visible, outside sidebar -->
   <button class="sidebar-hamburger" id="sidebar-hamburger" onclick="toggleSidebar()" aria-label="Toggle sidebar">
     <span></span><span></span><span></span>
   </button>
@@ -73,71 +73,89 @@
 
     <!-- Sidebar -->
     <aside class="sidebar" id="sidebar">
-      <div class="sidebar-title">Data Sources</div>
+      <div id="upload-section">
+        <div class="sidebar-title">Data Sources</div>
 
-      <div class="tabs">
-        <button class="tab active" data-tab="files">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-          Files
-        </button>
-        <button class="tab" data-tab="url">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-          URL
-        </button>
-        <button class="tab" data-tab="api">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-          API
-        </button>
+        <div class="tabs">
+          <button class="tab active" data-tab="files">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            Files
+          </button>
+          <button class="tab" data-tab="url">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+            URL
+          </button>
+          <button class="tab" data-tab="api">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            API
+          </button>
+        </div>
+
+        <!-- FILES -->
+        <div class="tab-panel active" id="panel-files">
+          <div class="limits-note">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            Up to 3 files · Max 15 MB · PDF, DOC, DOCX, TXT, MD, XLSX, XLS, CSV
+          </div>
+          <div class="drop-zone" id="drop-zone">
+            <input type="file" id="file-input" multiple accept=".pdf,.doc,.docx,.txt,.md,.xlsx,.xls,.csv" hidden aria-label="Choose files to upload" />
+            <div class="drop-icon">
+              <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            </div>
+            <p class="drop-title">Drag &amp; drop files here</p>
+            <p class="drop-sub">or</p>
+            <button class="browse-btn" onclick="document.getElementById('file-input').click()">Browse Files</button>
+          </div>
+          <div id="file-list" class="file-list"></div>
+        </div>
+
+        <!-- URL -->
+        <div class="tab-panel" id="panel-url">
+          <label class="field-label" for="url-input">Web Page URL</label>
+          <input type="url" id="url-input" class="text-input" placeholder="https://example.com/article" />
+          <p class="field-hint">Works with any web page including JavaScript-rendered sites.</p>
+        </div>
+
+        <!-- API -->
+        <div class="tab-panel" id="panel-api">
+          <label class="field-label" for="api-url-input">API Endpoint URL</label>
+          <input type="url" id="api-url-input" class="text-input" placeholder="https://api.example.com/data" />
+          <button class="toggle-headers-btn" id="toggle-headers">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+            Add Headers (optional)
+          </button>
+          <div id="headers-panel" class="headers-panel hidden">
+            <div id="headers-list">
+              <div class="header-row">
+                <input type="text" class="header-key" placeholder="Key (e.g. Authorization)" aria-label="Header key" />
+                <input type="text" class="header-val" placeholder="Value (e.g. Bearer token)" aria-label="Header value" />
+                <button class="remove-row" onclick="removeHeaderRow(this)">×</button>
+              </div>
+            </div>
+            <button class="add-header-btn" onclick="addHeaderRow()">+ Add Header</button>
+          </div>
+        </div>
       </div>
 
-      <!-- FILES -->
-      <div class="tab-panel active" id="panel-files">
+      <!-- CONNECTORS (source-system connectors) - swapped in for upload-section via toggleConnectorsView() -->
+      <div id="connectors-section" class="hidden">
         <div class="limits-note">
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-          Up to 3 files · Max 15 MB · PDF, DOC, DOCX, TXT
+          Connect a source and pick a file to add to this chat
         </div>
-        <div class="drop-zone" id="drop-zone">
-          <input type="file" id="file-input" multiple accept=".pdf,.doc,.docx,.txt" hidden aria-label="Choose files to upload" />
-          <div class="drop-icon">
-            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          </div>
-          <p class="drop-title">Drag &amp; drop files here</p>
-          <p class="drop-sub">or</p>
-          <button class="browse-btn" onclick="document.getElementById('file-input').click()">Browse Files</button>
-        </div>
-        <div id="file-list" class="file-list"></div>
-      </div>
-
-      <!-- URL -->
-      <div class="tab-panel" id="panel-url">
-        <label class="field-label" for="url-input">Web Page URL</label>
-        <input type="url" id="url-input" class="text-input" placeholder="https://example.com/article" />
-        <p class="field-hint">Works with any web page including JavaScript-rendered sites.</p>
-      </div>
-
-      <!-- API -->
-      <div class="tab-panel" id="panel-api">
-        <label class="field-label" for="api-url-input">API Endpoint URL</label>
-        <input type="url" id="api-url-input" class="text-input" placeholder="https://api.example.com/data" />
-        <button class="toggle-headers-btn" id="toggle-headers">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-          Add Headers (optional)
-        </button>
-        <div id="headers-panel" class="headers-panel hidden">
-          <div id="headers-list">
-            <div class="header-row">
-              <input type="text" class="header-key" placeholder="Key (e.g. Authorization)" aria-label="Header key" />
-              <input type="text" class="header-val" placeholder="Value (e.g. Bearer token)" aria-label="Header value" />
-              <button class="remove-row" onclick="removeHeaderRow(this)">×</button>
-            </div>
-          </div>
-          <button class="add-header-btn" onclick="addHeaderRow()">+ Add Header</button>
+        <div id="connector-list" class="connector-list">
+          <div class="connector-empty">Loading connectors…</div>
         </div>
       </div>
 
       <button class="process-btn" id="process-btn" onclick="processSource()">
         <span class="btn-text">Process &amp; Chat with ARIA</span>
         <span class="btn-spinner hidden"></span>
+      </button>
+
+      <button class="connectors-toggle-btn" id="connectors-toggle-btn" onclick="toggleConnectorsView()">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+        <span class="btn-text">Connect a Data Source</span>
       </button>
 
       <button class="reset-btn hidden" id="reset-btn" onclick="resetSession()">
@@ -160,8 +178,9 @@
           <p class="welcome-greeting">Your AI Research Intelligence Assistant.<br/>Upload your data and I'll answer anything about it.</p>
           <div class="welcome-steps">
             <div class="step"><span class="step-num">1</span>Upload a file, URL, or API</div>
-            <div class="step"><span class="step-num">2</span>Click Process &amp; Chat</div>
-            <div class="step"><span class="step-num">3</span>Ask me anything</div>
+            <div class="step"><span class="step-num">2</span>Or connect Gmail, GitHub &amp; more</div>
+            <div class="step"><span class="step-num">3</span>Click Process &amp; Chat</div>
+            <div class="step"><span class="step-num">4</span>Ask me anything</div>
           </div>
         </div>
       </div>
@@ -193,6 +212,19 @@
     </section>
 
   </main>
+
+  <!-- Connector browse modal - pops up above everything for Browse actions -->
+  <div id="connector-modal" class="connector-modal-overlay hidden" onclick="if(event.target===this) closeConnectorModal()">
+    <div class="connector-modal">
+      <div class="connector-modal-header">
+        <div class="connector-modal-title" id="connector-modal-title">Browse</div>
+        <button class="connector-modal-close" onclick="closeConnectorModal()" aria-label="Close">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="connector-modal-body" id="connector-modal-body"></div>
+    </div>
+  </div>
 
   <script src="/chat.js"></script>
 </body>

@@ -1,0 +1,6 @@
+Python Basics - Lesson 1
+
+Topics:
+- Variables
+- Data types
+- Basic input and output

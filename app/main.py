@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -10,6 +11,7 @@ from dotenv import load_dotenv
 
 from app.core.logging_config import setup_logging
 from app.routers import chat, upload, auth as auth_router
+from app.connectors import router as connectors_router
 from app.services import auth_service
 
 load_dotenv(override=True)
@@ -23,8 +25,15 @@ _STATIC_DIR  = os.path.join(os.path.dirname(__file__), "static")
 _SAMPLE_FILE = os.path.join(os.path.dirname(__file__), "data", "sample-ai-overview.txt")
 
 # Routes that do NOT require authentication
-_PUBLIC_PREFIXES = ("/auth", "/health", "/auth.html", "/auth.css", "/auth.js")
-_PROTECTED_PREFIXES = ("/chat/", "/upload/")
+# The 3 OAuth callback paths are here (not under /connectors/) because the
+# browser lands on them directly from Google/Salesforce's redirect with no
+# Authorization header - they can't be gated behind Bearer auth. They must
+# match GOOGLE_REDIRECT_URI / GOOGLE_DRIVE_REDIRECT_URI / SALESFORCE_REDIRECT_URI.
+_PUBLIC_PREFIXES = (
+    "/auth", "/health", "/auth.html", "/auth.css", "/auth.js",
+    "/gmail/callback", "/google-drive/callback", "/salesforce/callback",
+)
+_PROTECTED_PREFIXES = ("/chat/", "/upload/", "/connectors/")
 
 
 async def _seed_default_session():
@@ -35,7 +44,7 @@ async def _seed_default_session():
         from app.routers.upload import _add_texts_batched
 
         if session_has_data(DEFAULT_SESSION_ID):
-            logger.info("[DEFAULT] Sample session already seeded — skipping")
+            logger.info("[DEFAULT] Sample session already seeded - skipping")
             return
 
         def _read_sample() -> str:
@@ -48,7 +57,7 @@ async def _seed_default_session():
         store = get_vector_store(DEFAULT_SESSION_ID)
         metadatas = [{"source": "sample-ai-overview.txt", "chunk_index": i} for i in range(len(chunks))]
         _add_texts_batched(store, chunks, metadatas)
-        logger.info(f"[DEFAULT] Sample seeded — {len(chunks)} chunks into session={DEFAULT_SESSION_ID}")
+        logger.info(f"[DEFAULT] Sample seeded - {len(chunks)} chunks into session={DEFAULT_SESSION_ID}")
     except Exception as e:
         logger.warning(f"[DEFAULT] Could not seed sample session: {e}")
 
@@ -94,7 +103,7 @@ async def _warmup_parser():
     try:
         import tempfile
         from app.services.ingestion import parse_file
-        # Minimal valid single-page PDF (no text content — just enough to trigger LiteParse init)
+        # Minimal valid single-page PDF (no text content - just enough to trigger LiteParse init)
         minimal_pdf = (
             b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
             b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
@@ -110,7 +119,7 @@ async def _warmup_parser():
 
 
 async def _warmup():
-    """Run all warmup tasks in parallel — failures are logged but never block startup."""
+    """Run all warmup tasks in parallel - failures are logged but never block startup."""
     logger.info("[WARMUP] Pre-loading models and indexes...")
     await asyncio.gather(
         _warmup_embeddings(),
@@ -119,7 +128,24 @@ async def _warmup():
         _warmup_parser(),
         return_exceptions=True,
     )
-    logger.info("[WARMUP] Done — server is ready to serve requests without cold starts")
+    logger.info("[WARMUP] Done - server is ready to serve requests without cold starts")
+
+
+async def _periodic_cleanup():
+    """Every 3 minutes mark pending DB rows older than 5 minutes as failed.
+
+    Rows get stuck as 'pending' when a user refreshes mid-upload - the upload
+    process never completes so mark_complete never runs. This janitor sweeps them
+    up so the DB doesn't accumulate ghost records indefinitely.
+    """
+    await asyncio.sleep(60)  # let server fully start before first run
+    while True:
+        try:
+            from app.services.dedup import cleanup_stale_pending
+            await asyncio.to_thread(cleanup_stale_pending, 5)
+        except Exception as e:
+            logger.warning(f"[CLEANUP] Periodic cleanup error: {e}")
+        await asyncio.sleep(180)  # run every 3 minutes
 
 
 @asynccontextmanager
@@ -127,7 +153,11 @@ async def lifespan(app: FastAPI):
     logger.info("Server starting...")
     await _seed_default_session()
     await _warmup()
+    cleanup_task = asyncio.create_task(_periodic_cleanup())
     yield
+    cleanup_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await cleanup_task
     logger.info("Server shutting down.")
 
 
@@ -164,6 +194,9 @@ async def auth_middleware(request: Request, call_next):
 app.include_router(auth_router.router)
 app.include_router(upload.router)
 app.include_router(chat.router)
+app.include_router(connectors_router.router)
+app.include_router(connectors_router.unlock_router)
+app.include_router(connectors_router.oauth_callback_router)
 
 if os.getenv("WHATSAPP_ENABLED", "false").lower() == "true":
     from app.routers import whatsapp

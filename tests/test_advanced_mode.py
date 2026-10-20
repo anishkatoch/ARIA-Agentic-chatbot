@@ -1,5 +1,5 @@
 """
-Advanced Mode tests — UI toggle + backend connection + mid-chat switching.
+Advanced Mode tests - UI toggle + backend connection + mid-chat switching.
 
 Tests:
   1. Toggle exists and is OFF by default
@@ -251,7 +251,7 @@ class TestMidChatSwitching:
         assert page.evaluate("() => window._ragState.advancedMode") is False
 
     def test_rapid_switching_settles_correctly(self, page):
-        """Rapid toggle ON/OFF/ON/OFF — final state should match last action."""
+        """Rapid toggle ON/OFF/ON/OFF - final state should match last action."""
         for checked in [True, False, True, False, True]:
             page.locator("#advanced-toggle").evaluate(
                 f"el => {{ el.checked = {'true' if checked else 'false'}; el.dispatchEvent(new Event('change')); }}"
@@ -259,10 +259,10 @@ class TestMidChatSwitching:
             time.sleep(0.05)
 
         final = page.evaluate("() => window._ragState.advancedMode")
-        assert final is True, f"After ON/OFF/ON/OFF/ON — final state should be True, got: {final}"
+        assert final is True, f"After ON/OFF/ON/OFF/ON - final state should be True, got: {final}"
 
     def test_header_changes_immediately_after_toggle(self, page):
-        """Next request after toggling must use the NEW mode — no delay."""
+        """Next request after toggling must use the NEW mode - no delay."""
         # Start OFF
         page.locator("#advanced-toggle").evaluate("el => { el.checked = false; el.dispatchEvent(new Event('change')); }")
         time.sleep(0.05)
@@ -271,7 +271,7 @@ class TestMidChatSwitching:
         page.locator("#advanced-toggle").evaluate("el => { el.checked = true; el.dispatchEvent(new Event('change')); }")
         time.sleep(0.05)
 
-        # Immediately read state — must be true
+        # Immediately read state - must be true
         val = page.evaluate("() => window._ragState.advancedMode")
         assert val is True, "state.advancedMode must update immediately on toggle"
 
@@ -292,7 +292,7 @@ class TestBackendHeader:
             json={"session_id": "00000000-0000-0000-0000-000000000001", "question": "hi"},
             headers={"X-Advanced-Mode": "false"},
         )
-        # 200 or 500 (no vector store) — but NOT 422 (header not accepted)
+        # 200 or 500 (no vector store) - but NOT 422 (header not accepted)
         assert res.status_code != 422, f"Backend rejected X-Advanced-Mode header: {res.text}"
 
     def test_chat_accepts_advanced_true(self, api_client):
@@ -304,7 +304,7 @@ class TestBackendHeader:
         assert res.status_code != 422, f"Backend rejected X-Advanced-Mode: true header: {res.text}"
 
     def test_chat_defaults_to_false_if_header_missing(self, api_client):
-        """If header is absent, backend must not crash — defaults to false."""
+        """If header is absent, backend must not crash - defaults to false."""
         res = api_client.post(
             "/chat/",
             json={"session_id": "00000000-0000-0000-0000-000000000001", "question": "hi"},
@@ -330,7 +330,7 @@ class TestBackendHeader:
                 headers={"X-Advanced-Mode": "true"},
             )
         # Should not be 422 or 500 from bad header parsing
-        assert res.status_code in (200, 500), f"Unexpected status: {res.status_code} — {res.text}"
+        assert res.status_code in (200, 500), f"Unexpected status: {res.status_code} - {res.text}"
 
 
 # ── 7. Neo4j connection alive ─────────────────────────────────────────────────
@@ -340,7 +340,7 @@ class TestNeo4jConnection:
     def test_neo4j_driver_connects(self):
         from app.services.graph_store import _get_driver
         driver = _get_driver()
-        assert driver is not None, "Neo4j driver should connect — check NEO4J_URI/USER/PASSWORD in .env"
+        assert driver is not None, "Neo4j driver should connect - check NEO4J_URI/USER/PASSWORD in .env"
 
     def test_neo4j_connection_is_alive(self):
         from app.services.graph_store import _get_driver
@@ -365,7 +365,7 @@ class TestNeo4jConnection:
     def test_build_graph_returns_bool(self):
         from app.services.graph_store import build_graph
         from app.services.rag import get_llm
-        # Empty chunks — should return False gracefully
+        # Empty chunks - should return False gracefully
         result = build_graph([], "test_session_empty", get_llm())
         assert isinstance(result, bool), "build_graph must return a bool"
 
@@ -429,7 +429,7 @@ class TestBothModesWork:
         assert len(data["answer"]) > 0
 
     def test_switching_mid_chat_simple_then_advanced(self, api_client):
-        """Send one message simple, then one advanced — both must work."""
+        """Send one message simple, then one advanced - both must work."""
         from unittest.mock import patch, MagicMock
         from langchain_core.documents import Document
 
@@ -446,19 +446,19 @@ class TestBothModesWork:
         sid = "00000000-0000-0000-0000-000000000033"
 
         with patch("app.routers.chat.get_vector_store", return_value=mock_vs):
-            # Message 1 — simple mode
+            # Message 1 - simple mode
             r1 = api_client.post("/chat/",
                 json={"session_id": sid, "question": "summarize the doc"},
                 headers={"X-Advanced-Mode": "false"})
             assert r1.status_code == 200, f"Simple mode msg failed: {r1.text}"
 
-            # Message 2 — switch to advanced mid-chat
+            # Message 2 - switch to advanced mid-chat
             r2 = api_client.post("/chat/",
                 json={"session_id": sid, "question": "what are the obligations?"},
                 headers={"X-Advanced-Mode": "true"})
             assert r2.status_code == 200, f"Advanced mode msg failed: {r2.text}"
 
-            # Message 3 — switch back to simple
+            # Message 3 - switch back to simple
             r3 = api_client.post("/chat/",
                 json={"session_id": sid, "question": "who are the parties?"},
                 headers={"X-Advanced-Mode": "false"})

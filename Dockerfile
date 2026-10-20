@@ -16,7 +16,7 @@ RUN uv sync --frozen --no-install-project
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers
 RUN uv run playwright install --with-deps chromium
 
-# Pre-download Docling's layout/table models into the image (cached layer —
+# Pre-download Docling's layout/table models into the image (cached layer -
 # only reruns when dependencies change) so the first request that falls back
 # to Docling from LiteParse doesn't pay the multi-minute first-run download.
 ENV HF_HOME=/app/.cache/huggingface

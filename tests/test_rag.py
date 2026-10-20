@@ -1,6 +1,6 @@
 """
 Tests for app/services/rag.py pure helpers.
-No LLM calls, no vector store — only chunk_text*, find_page.
+No LLM calls, no vector store - only chunk_text*, find_page.
 """
 import pytest
 from app.services.rag import chunk_text, chunk_text_with_offsets, find_page

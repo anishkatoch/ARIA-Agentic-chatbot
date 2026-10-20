@@ -1,4 +1,4 @@
-"""Add embedding_model_usage table — tracks per-model token usage for
+"""Add embedding_model_usage table - tracks per-model token usage for
 automatic fallback when a model's free quota is exhausted or it fails.
 
 Revision ID: 002

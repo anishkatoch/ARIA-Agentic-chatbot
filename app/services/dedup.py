@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import logging
 import math
+import threading
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
@@ -17,13 +18,67 @@ CONFIRM_TIMEOUT_S = 60
 def _threshold_bytes() -> float:
     return cfg.dedup_threshold_mb * 1024 * 1024
 
-# Confirm gate — two separate dicts so resolve() is one-shot
+# Confirm gate - two separate dicts so resolve() is one-shot
 _pending_confirms: dict[str, asyncio.Event] = {}   # waiting for user decision
 _resolved_actions: dict[str, str] = {}             # decision received, not yet consumed
 
-# In-memory dedup cache — fallback when DB writes fail.
+# In-memory dedup cache - fallback when DB writes fail.
 # (client_token, content_hash) → (session_id, chunks_stored)
 _mem_cache: dict[tuple[str, str], tuple[str, int]] = {}
+
+# Active upload tracking - (client_token, content_hash) pairs currently being processed.
+# The periodic cleanup skips these rows so a legitimately slow upload is never killed.
+_active_uploads: set[tuple[str, str]] = set()
+_active_lock = threading.Lock()
+
+
+def register_active(client_token: str, content_hash: str) -> None:
+    with _active_lock:
+        _active_uploads.add((client_token, content_hash))
+
+
+def unregister_active(client_token: str, content_hash: str) -> None:
+    with _active_lock:
+        _active_uploads.discard((client_token, content_hash))
+
+
+def resolve_session_id(requested_session_id: Optional[str], client_token: str) -> Optional[str]:
+    """Validates a caller-supplied "join this existing session" request.
+
+    The `sessions` table has no owner column, so ownership is checked via
+    `documents`: a session only counts as "yours" if at least one document
+    was previously written into it under this same client_token. Without
+    this, any caller could pass an arbitrary/guessed session_id (e.g. from a
+    shared chat link or a request log) and have their new upload/connector
+    document silently injected into a stranger's chat session.
+
+    Returns the session_id if it checks out, otherwise None (caller should
+    mint a fresh session instead of trusting the request) - this fails safe
+    (falls back to "start a new session"), never fails hard.
+    """
+    if not requested_session_id:
+        return None
+    db = _get_db_session()
+    if db is None:
+        logger.warning("[DEDUP] Could not verify session_id ownership (DB unavailable) - starting a new session instead")
+        return None
+    try:
+        from app.models.db import Document
+        owned = (
+            db.query(Document)
+            .filter(Document.session_id == requested_session_id, Document.client_token == client_token)
+            .first()
+            is not None
+        )
+        if not owned:
+            logger.warning(f"[DEDUP] session_id {requested_session_id} does not belong to this client - starting a new session instead")
+            return None
+        return requested_session_id
+    except Exception as e:
+        logger.warning(f"[DEDUP] session_id ownership check failed ({e}) - starting a new session instead")
+        return None
+    finally:
+        db.close()
 
 
 # ── Hashing ───────────────────────────────────────────────────────────────────
@@ -47,7 +102,7 @@ def _tfidf_similarity(text_a: str, text_b: str) -> float:
     tf_b = Counter(tokens_b)
     all_words = set(tf_a) | set(tf_b)
 
-    # Smoothed IDF: log((N+1)/(df+1)) + 1 — prevents zero weights when all docs share a term
+    # Smoothed IDF: log((N+1)/(df+1)) + 1 - prevents zero weights when all docs share a term
     N = 2
     idf = {
         w: math.log((N + 1) / ((1 if w in tf_a else 0) + (1 if w in tf_b else 0) + 1)) + 1
@@ -105,7 +160,7 @@ def _get_db_session():
 def _find_existing(db, client_token: str, filename: str,
                    file_size: int, content_hash: str):
     from app.models.db import Document
-    # Match on hash alone — SHA256 uniquely identifies content.
+    # Match on hash alone - SHA256 uniquely identifies content.
     # Also handles "pending" records left by prior crashed uploads.
     record = (
         db.query(Document)
@@ -160,7 +215,7 @@ def _insert_pending(db, client_token: str, session_id: str,
         db.add(Session(id=sid))
         db.flush()  # write session row first to satisfy FK
     except Exception as e:
-        logger.warning(f"[DEDUP] Session insert failed ({type(e).__name__}: {e}) — rolling back and retrying")
+        logger.warning(f"[DEDUP] Session insert failed ({type(e).__name__}: {e}) - rolling back and retrying")
         db.rollback()
 
     doc = Document(
@@ -222,6 +277,59 @@ def _mark_failed(db, client_token: str, content_hash: str):
         db.commit()
 
 
+def cleanup_stale_pending(older_than_minutes: int = 5) -> int:
+    """Mark pending rows older than N minutes as failed. Returns count cleaned.
+
+    Skips any row whose (client_token, content_hash) is registered as actively
+    uploading - a legitimately slow file is never wrongly killed.
+    """
+    from datetime import timedelta
+    from app.models.db import Document
+
+    with _active_lock:
+        active_snapshot = frozenset(_active_uploads)
+
+    db = _get_db_session()
+    if db is None:
+        return 0
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)
+        candidates = (
+            db.query(Document)
+            .filter(
+                Document.status      == "pending",
+                Document.uploaded_at  < cutoff,
+            )
+            .all()
+        )
+        stale = [
+            doc for doc in candidates
+            if (doc.client_token, doc.content_hash) not in active_snapshot
+        ]
+        count = len(stale)
+        for doc in stale:
+            doc.status = "failed"
+        if count:
+            db.commit()
+            logger.info(
+                f"[DEDUP] Cleanup - marked {count} stale pending row(s) as failed "
+                f"(>{older_than_minutes} min old)"
+            )
+        skipped = len(candidates) - count
+        if skipped:
+            logger.info(f"[DEDUP] Cleanup - skipped {skipped} actively uploading row(s)")
+        return count
+    except Exception as e:
+        logger.warning(f"[DEDUP] Cleanup error: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return 0
+    finally:
+        db.close()
+
+
 # ── Vector collection verification ───────────────────────────────────────────
 
 def _collection_has_vectors(session_id: str) -> bool:
@@ -261,7 +369,7 @@ async def copy_vectors_to_master(old_session_id: str, master_store) -> int:
                     metadatas=data["metadatas"], embeddings=emb,
                 )
             else:
-                # embeddings not returned by get() — re-add via langchain (re-embeds)
+                # embeddings not returned by get() - re-add via langchain (re-embeds)
                 master_store.add_texts(docs, metadatas=data["metadatas"])
             return len(docs)
         except Exception as e:
@@ -322,7 +430,7 @@ async def check(
     content_hash = await asyncio.to_thread(sha256, content)
     threshold_bytes = _threshold_bytes()
 
-    # Rule 0 — in-memory cache (survives DB failures, resets on server restart)
+    # Rule 0 - in-memory cache (survives DB failures, resets on server restart)
     cache_key = (client_token, content_hash)
     if cache_key in _mem_cache:
         cached_session_id, cached_chunks = _mem_cache[cache_key]
@@ -337,12 +445,12 @@ async def check(
         return DedupResult("process_fresh", reason="db_unavailable")
 
     try:
-        # Rule 1 — hash match in DB
+        # Rule 1 - hash match in DB
         existing = await asyncio.to_thread(
             _find_existing, db, client_token, filename, file_size, content_hash
         )
         if existing:
-            # Use chunks_stored as a fast proxy — avoids a slow HF embedding call.
+            # Use chunks_stored as a fast proxy - avoids a slow HF embedding call.
             # chunks_stored is set by mark_complete only after vectors are written.
             chunks = existing.chunks_stored or 0
             if chunks > 0:
@@ -352,7 +460,7 @@ async def check(
             logger.info(f"[DEDUP] {filename} → hash match but chunks_stored=0, processing fresh")
             return DedupResult("process_fresh", reason="collection_missing")
 
-        # Rule 2 — same filename, different hash/size → process fresh
+        # Rule 2 - same filename, different hash/size → process fresh
         from app.models.db import Document as DocModel
         same_name = (
             db.query(DocModel)
@@ -365,12 +473,12 @@ async def check(
             logger.info(f"[DEDUP] {filename} → same name, different content, processing fresh")
             return DedupResult("process_fresh", reason="same_name_different_content")
 
-        # Rule 3 — different filename, file < threshold
+        # Rule 3 - different filename, file < threshold
         if file_size < threshold_bytes:
             logger.info(f"[DEDUP] {filename} → below {cfg.dedup_threshold_mb}MB threshold, processing fresh")
             return DedupResult("process_fresh", reason="below_threshold")
 
-        # Rule 4 — TF-IDF 3-point check (async, CPU-bound)
+        # Rule 4 - TF-IDF 3-point check (async, CPU-bound)
         if len(parsed_text) < 1500:
             logger.info(f"[DEDUP] {filename} → text too short for TF-IDF, processing fresh")
             return DedupResult("process_fresh", reason="text_too_short")

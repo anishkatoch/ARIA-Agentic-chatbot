@@ -21,6 +21,9 @@ MIME_TO_EXT: dict[str, str] = {
     "application/msword": ".doc",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
     "text/plain": ".txt",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.ms-excel": ".xls",
+    "text/csv": ".csv",
 }
 
 
@@ -31,7 +34,7 @@ def _xml(message: str) -> Response:
         resp.message(message)
         return Response(content=str(resp), media_type="application/xml")
     except ImportError:
-        # Fallback if twilio not installed — still returns valid TwiML
+        # Fallback if twilio not installed - still returns valid TwiML
         body = f'<?xml version="1.0" encoding="UTF-8"?><Response><Message>{message}</Message></Response>'
         return Response(content=body, media_type="application/xml")
 
@@ -53,7 +56,7 @@ async def whatsapp_webhook(
         ext = MIME_TO_EXT.get(MediaContentType0 or "", "")
         if not ext:
             logger.warning(f"[WHATSAPP] Unsupported MIME: {MediaContentType0}")
-            return _xml("Sorry, unsupported file type. Please send a PDF, DOC, DOCX, or TXT file.")
+            return _xml("Sorry, unsupported file type. Please send a PDF, DOC, DOCX, TXT, XLSX, XLS, or CSV file.")
 
         # Download media from Twilio (requires Basic Auth)
         try:
@@ -77,7 +80,7 @@ async def whatsapp_webhook(
             vector_store = get_vector_store(session_id)
             vector_store.add_texts(chunks)
             _sessions[phone] = session_id
-            logger.info(f"[WHATSAPP] Stored — phone={phone}, session={session_id}, chunks={len(chunks)}")
+            logger.info(f"[WHATSAPP] Stored - phone={phone}, session={session_id}, chunks={len(chunks)}")
             return _xml(
                 f"✅ Document ready! Processed {len(chunks)} chunks from your {ext.lstrip('.'). upper()} file.\n\n"
                 "Ask me anything about it."
@@ -92,21 +95,21 @@ async def whatsapp_webhook(
     # No message body at all
     if not body:
         return _xml(
-            "👋 Hi! Send me a document (PDF, DOC, DOCX, or TXT) "
+            "👋 Hi! Send me a document (PDF, DOC, DOCX, TXT, XLSX, XLS, or CSV) "
             "and I'll answer your questions about it."
         )
 
     # Reset command
     if body.lower() in ("reset", "new", "start over", "restart"):
         _sessions.pop(phone, None)
-        logger.info(f"[WHATSAPP] Session reset — phone={phone}")
+        logger.info(f"[WHATSAPP] Session reset - phone={phone}")
         return _xml("Session cleared. Send me a new document to get started.")
 
     # No session yet
     session_id = _sessions.get(phone)
     if not session_id:
         return _xml(
-            "👋 Hello! Please send me a document first (PDF, DOC, DOCX, or TXT) "
+            "👋 Hello! Please send me a document first (PDF, DOC, DOCX, TXT, XLSX, XLS, or CSV) "
             "and I'll answer your questions about it.\n\n"
             "Tip: send *reset* at any time to start a new session."
         )
@@ -115,7 +118,7 @@ async def whatsapp_webhook(
     try:
         vector_store = get_vector_store(session_id)
         answer, elapsed_ms, _ = answer_question(vector_store, body)
-        logger.info(f"[WHATSAPP] Answered — phone={phone}, time={elapsed_ms}ms, q='{body[:60]}'")
+        logger.info(f"[WHATSAPP] Answered - phone={phone}, time={elapsed_ms}ms, q='{body[:60]}'")
         return _xml(answer)
     except Exception as e:
         logger.error(f"[WHATSAPP] Answer failed: {e}")

@@ -194,7 +194,7 @@ class TestConfirmGate:
 
 class TestDedupCheck:
     """
-    All DB calls are mocked — no real Postgres required.
+    All DB calls are mocked - no real Postgres required.
     """
 
     @pytest.fixture(autouse=True)

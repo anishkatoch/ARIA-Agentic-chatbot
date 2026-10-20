@@ -34,7 +34,7 @@ def _load_from_db() -> None:
     global _loaded
     db = _get_db_session()
     if db is None:
-        _loaded = True  # nothing to load — proceed with in-memory defaults
+        _loaded = True  # nothing to load - proceed with in-memory defaults
         return
     try:
         from app.models.db import EmbeddingModelUsage
@@ -117,7 +117,7 @@ def record_usage(model: str, tokens: int, provider: str = "voyage") -> None:
 
 
 def mark_broken(model: str, error: str, provider: str = "voyage") -> None:
-    """Mark a model as broken (call failed outright — not just quota exhaustion)
+    """Mark a model as broken (call failed outright - not just quota exhaustion)
     so it's skipped on future selection without needing to keep failing."""
     _ensure_loaded()
     with _lock:

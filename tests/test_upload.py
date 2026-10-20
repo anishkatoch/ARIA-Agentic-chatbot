@@ -54,7 +54,7 @@ class TestFileCountValidation:
              patch("app.services.dedup._get_db_session", return_value=None):
             with client.stream("POST", "/upload/files", files=files,
                                headers={"X-Client-Token": "t1-unique"}) as response:
-                # Drain the SSE stream — we only care it doesn't 400 with "Maximum"
+                # Drain the SSE stream - we only care it doesn't 400 with "Maximum"
                 events = list(response.iter_lines())
         # 400 is only acceptable if NOT about file count
         if response.status_code == 400:
@@ -107,7 +107,7 @@ class TestExtensionValidation:
             assert "Unsupported" not in res.json().get("detail", "")
 
     def test_txt_accepted(self):
-        """TXT extension must not be rejected — txt also doesn't need LiteParse."""
+        """TXT extension must not be rejected - txt also doesn't need LiteParse."""
         client = _make_client()
         mock_store = MagicMock()
         mock_store.add_texts = MagicMock()
@@ -203,7 +203,7 @@ class TestConfirmEndpoint:
         assert res.status_code == 422
 
     def test_second_confirm_same_token_returns_404(self):
-        """resolve_confirm is one-shot — second POST on same token must 404."""
+        """resolve_confirm is one-shot - second POST on same token must 404."""
         client = _make_client()
         from app.services.dedup import create_confirm_gate, _pending_confirms, _resolved_actions
         _pending_confirms.clear()

@@ -67,7 +67,7 @@ class ChatHistory(Base):
 
 
 class EmbeddingModelUsage(Base):
-    """Cumulative token usage per embedding model — lets the app auto-switch
+    """Cumulative token usage per embedding model - lets the app auto-switch
     to the next model in the priority list once a model's free quota is used
     up, or once it's been marked broken after a failed call."""
     __tablename__ = "embedding_model_usage"

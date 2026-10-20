@@ -23,7 +23,7 @@ from langchain_core.documents import Document
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ── Sample corpus (embedded inline — no file upload needed) ──────────────────
+# ── Sample corpus (embedded inline - no file upload needed) ──────────────────
 
 CORPUS = """
 MUTUAL NON-DISCLOSURE AGREEMENT
@@ -101,7 +101,7 @@ and may need to share proprietary and confidential information with each other.
    a written instrument signed by authorized representatives of both parties.
 """
 
-# Chunk at ~600 chars with 150-char overlap — wide enough to keep full clause sections intact
+# Chunk at ~600 chars with 150-char overlap - wide enough to keep full clause sections intact
 from langchain_text_splitters import RecursiveCharacterTextSplitter as _RTS
 _splitter = _RTS(chunk_size=600, chunk_overlap=150)
 CORPUS_CHUNKS = _splitter.split_text(CORPUS)
@@ -130,9 +130,9 @@ CITATIONS PROVIDED: {json.dumps(citations, indent=2)}
 
 Evaluate the answer on these 3 criteria (score 1-5, where 5 = perfect):
 
-1. faithfulness    — Is every claim in the answer supported by the context? (1=many unsupported claims, 5=fully grounded)
-2. completeness    — Does the answer address what was asked? (1=misses the point, 5=fully addresses question)
-3. no_hallucination — Does the answer avoid inventing facts not in the context? (1=major hallucination, 5=no hallucination)
+1. faithfulness    - Is every claim in the answer supported by the context? (1=many unsupported claims, 5=fully grounded)
+2. completeness    - Does the answer address what was asked? (1=misses the point, 5=fully addresses question)
+3. no_hallucination - Does the answer avoid inventing facts not in the context? (1=major hallucination, 5=no hallucination)
 
 Also note any bugs, gaps, or issues you observe.
 
@@ -252,7 +252,7 @@ SCENARIOS = [
     },
     {
         "id": "T09",
-        "label": "Small talk — intent check (should NOT do retrieval)",
+        "label": "Small talk - intent check (should NOT do retrieval)",
         "question": "Hello, how are you?",
         "expected_contains": [],  # any friendly response is fine
         "advanced": False,
@@ -260,7 +260,7 @@ SCENARIOS = [
     },
     {
         "id": "T10",
-        "label": "Advanced mode — query rewrite + graph context",
+        "label": "Advanced mode - query rewrite + graph context",
         "question": "What obligations does Acme Corp have toward Beta Solutions?",
         "expected_contains": ["confidential", "disclose"],
         "advanced": True,
@@ -310,12 +310,12 @@ class TestE2EPipeline:
             assert len(citations) == 0, (
                 f"[{scenario['id']}] Small talk should produce 0 citations, got {len(citations)}"
             )
-            logger.info(f"  [PASS] Small talk — no citations as expected")
+            logger.info(f"  [PASS] Small talk - no citations as expected")
             return
 
         # ── RAG: should have citations ───────────────────────────────
         assert len(citations) > 0, (
-            f"[{scenario['id']}] RAG question produced 0 citations — vector retrieval may be broken"
+            f"[{scenario['id']}] RAG question produced 0 citations - vector retrieval may be broken"
         )
 
         # ── Keyword presence check ───────────────────────────────────
@@ -378,7 +378,7 @@ class TestBM25:
     def test_bm25_empty_query_handled(self, test_vectorstore):
         from app.services.rag import _bm25_search
         results = _bm25_search(test_vectorstore, SESSION_ID, "zzzzzzzzquerynotexist", top_k=3)
-        # May return [] or low-score docs — should not raise
+        # May return [] or low-score docs - should not raise
         assert isinstance(results, list)
 
     def test_bm25_cache_hit(self, test_vectorstore):
@@ -426,7 +426,7 @@ class TestNeo4j:
 
 
 class TestLatency:
-    """All latency checks — flags slow paths as bugs."""
+    """All latency checks - flags slow paths as bugs."""
 
     def test_intent_check_under_5s(self):
         from app.services.rag import check_intent

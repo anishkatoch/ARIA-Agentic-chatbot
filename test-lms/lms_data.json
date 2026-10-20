@@ -1,0 +1,51 @@
+{
+  "courses": [
+    {
+      "id": "course-python-101",
+      "name": "Python Basics",
+      "description": "Introduction to Python programming",
+      "modules": [
+        {
+          "id": "module-python-1",
+          "name": "Getting Started",
+          "files": ["file-python-1", "file-python-2"]
+        }
+      ]
+    },
+    {
+      "id": "course-api-101",
+      "name": "API Fundamentals",
+      "description": "Introduction to REST APIs",
+      "modules": [
+        {
+          "id": "module-api-1",
+          "name": "REST API Basics",
+          "files": ["file-api-1"]
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "id": "file-python-1",
+      "course_id": "course-python-101",
+      "module_id": "module-python-1",
+      "name": "lesson-1.txt",
+      "path": "python-basics/lesson-1.txt"
+    },
+    {
+      "id": "file-python-2",
+      "course_id": "course-python-101",
+      "module_id": "module-python-1",
+      "name": "lesson-2.txt",
+      "path": "python-basics/lesson-2.txt"
+    },
+    {
+      "id": "file-api-1",
+      "course_id": "course-api-101",
+      "module_id": "module-api-1",
+      "name": "rest-api-intro.txt",
+      "path": "api-fundamentals/rest-api-intro.txt"
+    }
+  ]
+}

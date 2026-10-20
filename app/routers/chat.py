@@ -21,7 +21,7 @@ async def chat(
     advanced  = x_advanced_mode.lower() == "true"
     thinking  = x_thinking_mode.lower() == "true"
     logger.info(
-        f"[CHAT] Request — session={request.session_id}, "
+        f"[CHAT] Request - session={request.session_id}, "
         f"advanced={advanced}, thinking={thinking}, "
         f"question='{request.question[:80]}{'...' if len(request.question) > 80 else ''}'"
     )
@@ -30,7 +30,7 @@ async def chat(
         # Fall back to the sample session if the user hasn't uploaded anything yet
         if not session_has_data(session_id):
             session_id = DEFAULT_SESSION_ID
-            logger.info(f"[CHAT] No data in session — using default sample session")
+            logger.info(f"[CHAT] No data in session - using default sample session")
         vector_store = get_vector_store(session_id)
         answer, elapsed_ms, citations = answer_question(
             vectorstore=vector_store,
@@ -39,7 +39,7 @@ async def chat(
             advanced=advanced,
             thinking=thinking,
         )
-        logger.info(f"[CHAT] Done — session={request.session_id}, time={elapsed_ms}ms, citations={len(citations)}")
+        logger.info(f"[CHAT] Done - session={request.session_id}, time={elapsed_ms}ms, citations={len(citations)}")
         return ChatResponse(
             session_id=request.session_id,
             answer=answer,
@@ -47,5 +47,5 @@ async def chat(
             citations=citations,
         )
     except Exception as e:
-        logger.error(f"[CHAT] Error — session={request.session_id}, error={e}", exc_info=True)
+        logger.error(f"[CHAT] Error - session={request.session_id}, error={e}", exc_info=True)
         raise HTTPException(500, "An error occurred processing your question. Please try again.")

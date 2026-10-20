@@ -64,7 +64,7 @@ def reset_files(page):
 
 
 def drop_file_via_input(page, file_path: str):
-    """Use Playwright's set_input_files — most reliable way to simulate file selection."""
+    """Use Playwright's set_input_files - most reliable way to simulate file selection."""
     page.set_input_files("#file-input", file_path)
     time.sleep(0.3)
 
@@ -145,7 +145,7 @@ class TestDragDropVisualFeedback:
         assert not has_class, "dragover class should be gone after drop"
 
     def test_dragleave_removes_class_when_counter_zero(self, page):
-        """Enter once, leave once — counter hits 0 → class removed."""
+        """Enter once, leave once - counter hits 0 → class removed."""
         page.evaluate("() => { document.getElementById('drop-zone').classList.remove('dragover'); }")
         dispatch_drag_event(page, "dragenter")  # counter = 1
         dispatch_drag_event(page, "dragleave")  # counter = 0 → class removed

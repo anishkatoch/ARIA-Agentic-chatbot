@@ -1,4 +1,4 @@
-"""Phase 5 — add dedup columns to documents table
+"""Phase 5 - add dedup columns to documents table
 
 Revision ID: 001
 Revises:
@@ -63,7 +63,7 @@ def upgrade() -> None:
         )
         return
 
-    # ── Table already exists — add missing columns one by one ────
+    # ── Table already exists - add missing columns one by one ────
     new_cols = {
         "client_token":   sa.Column("client_token",   sa.String(),     nullable=False, server_default="anonymous"),
         "file_size":      sa.Column("file_size",      sa.BigInteger(), nullable=False, server_default="0"),

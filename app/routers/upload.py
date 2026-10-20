@@ -19,22 +19,22 @@ from app.services import dedup as dedup_svc
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/upload", tags=["upload"])
 
-EMBED_BATCH_SIZE  = 50   # chunks per HF API call (raised from 32 — fewer round-trips)
+EMBED_BATCH_SIZE  = 50   # chunks per HF API call (raised from 32 - fewer round-trips)
 EMBED_CONCURRENCY = 3    # parallel embed+insert batches
 
 
 def _add_texts_batched(store, texts: list[str], metadatas: list[dict]) -> None:
-    """Sequential fallback — used for seeding the default session at startup."""
+    """Sequential fallback - used for seeding the default session at startup."""
     total_batches = -(-len(texts) // EMBED_BATCH_SIZE)
     for i in range(0, len(texts), EMBED_BATCH_SIZE):
         batch_t = texts[i: i + EMBED_BATCH_SIZE]
         batch_m = metadatas[i: i + EMBED_BATCH_SIZE]
         store.add_texts(batch_t, metadatas=batch_m)
-        logger.info(f"[EMBED] batch {i // EMBED_BATCH_SIZE + 1}/{total_batches} — {len(batch_t)} chunks")
+        logger.info(f"[EMBED] batch {i // EMBED_BATCH_SIZE + 1}/{total_batches} - {len(batch_t)} chunks")
 
 
 async def _add_texts_batched_parallel(store, texts: list[str], metadatas: list[dict]) -> None:
-    """Embed and insert in parallel batches — faster than sequential for large docs."""
+    """Embed and insert in parallel batches - faster than sequential for large docs."""
     batches = [
         (texts[i: i + EMBED_BATCH_SIZE], metadatas[i: i + EMBED_BATCH_SIZE])
         for i in range(0, len(texts), EMBED_BATCH_SIZE)
@@ -45,7 +45,7 @@ async def _add_texts_batched_parallel(store, texts: list[str], metadatas: list[d
     async def _run_batch(idx: int, batch_t: list, batch_m: list) -> None:
         async with sem:
             await asyncio.to_thread(store.add_texts, batch_t, metadatas=batch_m)
-            logger.info(f"[EMBED] batch {idx + 1}/{total} — {len(batch_t)} chunks")
+            logger.info(f"[EMBED] batch {idx + 1}/{total} - {len(batch_t)} chunks")
 
     await asyncio.gather(*[_run_batch(i, bt, bm) for i, (bt, bm) in enumerate(batches)])
 
@@ -81,7 +81,7 @@ def _spawn_background(coro) -> None:
     task.add_done_callback(_background_tasks.discard)
 
 
-ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt"}
+ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt", ".md", ".xlsx", ".xls", ".csv"}
 
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
@@ -129,18 +129,31 @@ async def confirm_dedup(request: ConfirmRequest):
 async def upload_files(
     files: List[UploadFile] = File(...),
     x_client_token: str = Header(default="anonymous"),
+    x_session_id: str | None = Header(default=None),
 ):
     if len(files) > cfg.max_files_per_session:
         raise HTTPException(400, f"Maximum {cfg.max_files_per_session} files allowed per session")
 
+    # Unsupported files are skipped (not fatal) so a mixed batch still
+    # processes everything it can - only an all-unsupported batch is rejected.
+    supported_files = []
+    skipped_files: list[tuple[str, str]] = []  # (filename, ext)
     for file in files:
         ext = os.path.splitext(file.filename)[1].lower()
-        if ext not in ALLOWED_EXTENSIONS:
-            raise HTTPException(400, f"Unsupported type: {ext}. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
+        if ext in ALLOWED_EXTENSIONS:
+            supported_files.append(file)
+        else:
+            skipped_files.append((file.filename, ext))
+
+    if not supported_files:
+        raise HTTPException(
+            400,
+            f"Unsupported type for all uploaded files. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+        )
 
     file_data = []
     total_size = 0
-    for file in files:
+    for file in supported_files:
         content = await file.read()
         size_mb = len(content) / (1024 * 1024)
         total_size += len(content)
@@ -154,67 +167,157 @@ async def upload_files(
 
     async def stream() -> AsyncGenerator[str, None]:
         t0 = time.time()
-        master_session_id = str(uuid.uuid4())
+        # Reuse the caller's existing session (if they already have an active
+        # chat) so these files join it instead of starting an isolated new
+        # session that orphans whatever was uploaded/connected before - same
+        # fix as the connector ingest path (see pipeline_bridge.ingest_bytes).
+        # resolve_session_id verifies x_session_id actually belongs to this
+        # client_token before trusting it, so a guessed/leaked session_id
+        # can't be used to inject documents into someone else's session.
+        master_session_id = dedup_svc.resolve_session_id(x_session_id, client_token) or str(uuid.uuid4())
         master_store = get_vector_store(master_session_id)
         total_chunks = 0
+        pending_files: set[tuple[str, str]] = set()  # (client_token, content_hash) inserted but not yet complete
 
-        logger.info(f"[UPLOAD] session={master_session_id}, files={len(file_data)}, client={client_token}")
+        logger.info(
+            f"[UPLOAD] session={master_session_id}, files={len(file_data)}, "
+            f"skipped={len(skipped_files)}, client={client_token}"
+        )
 
-        for i, (filename, content) in enumerate(file_data):
-            ext   = os.path.splitext(filename)[1].upper().lstrip('.') or 'DOC'
-            stage = f"parse_{i}"
-
-            # ── Dedup check ──────────────────────────────────────────────────
-            yield sse({"type": "step", "status": "start", "stage": f"dedup_{i}",
-                       "title": "Checking for duplicates",
-                       "message": f"Checking {filename}..."})
+        for skipped_name, skipped_ext in skipped_files:
+            label = skipped_ext or "unknown type"
+            logger.warning(f"[UPLOAD] {skipped_name} → skipped, unsupported extension ({label})")
+            yield sse({
+                "type":    "warning",
+                "message": f"{skipped_name} wasn't processed - {label} files aren't supported.",
+            })
             await asyncio.sleep(0)
 
-            t1 = time.time()
-            text_for_dedup, page_spans = await parse_file(content, filename)
-            avg_conf = None
-            if page_spans:
-                confs = [float(p["confidence"]) for p in page_spans if p.get("confidence")]
-                avg_conf = sum(confs) / len(confs) if confs else None
+        try:
+            for i, (filename, content) in enumerate(file_data):
+                ext   = os.path.splitext(filename)[1].upper().lstrip('.') or 'DOC'
+                stage = f"parse_{i}"
 
-            result = await dedup_svc.check(
-                client_token  = client_token,
-                filename      = filename,
-                file_size     = len(content),
-                content       = content,
-                parsed_text   = text_for_dedup,
-                avg_confidence= avg_conf,
-            )
+                # ── Dedup check ──────────────────────────────────────────────────
+                yield sse({"type": "step", "status": "start", "stage": f"dedup_{i}",
+                           "title": "Checking for duplicates",
+                           "message": f"Checking {filename}..."})
+                await asyncio.sleep(0)
 
-            if result.action == "confirm":
-                # Ask user — pause SSE stream
-                confirm_token = str(uuid.uuid4())
-                gate = dedup_svc.create_confirm_gate(confirm_token)
-                doc  = result.doc
+                t1 = time.time()
+                text_for_dedup, page_spans = await parse_file(content, filename)
+                avg_conf = None
+                if page_spans:
+                    confs = [float(p["confidence"]) for p in page_spans if p.get("confidence")]
+                    avg_conf = sum(confs) / len(confs) if confs else None
 
-                cached_chunks = dedup_svc._mem_cache.get(
-                    (client_token, dedup_svc.sha256(content)), (None, 0)
-                )[1]
-                chunks_stored = (doc.chunks_stored if doc else None) or cached_chunks
-                yield sse({
-                    "type":          "dedup_confirm",
-                    "confirm_token": confirm_token,
-                    "filename":      filename,
-                    "file_size":     _human_size(len(content)),
-                    "chunks_stored": chunks_stored,
-                    "reason":        result.reason,
-                    "stage":         f"dedup_{i}",
-                })
+                result = await dedup_svc.check(
+                    client_token  = client_token,
+                    filename      = filename,
+                    file_size     = len(content),
+                    content       = content,
+                    parsed_text   = text_for_dedup,
+                    avg_confidence= avg_conf,
+                )
 
-                try:
-                    await asyncio.wait_for(gate.wait(), timeout=dedup_svc.CONFIRM_TIMEOUT_S)
-                    action = dedup_svc.consume_confirm(confirm_token)
-                except asyncio.TimeoutError:
-                    dedup_svc.consume_confirm(confirm_token)
-                    action = "reprocess"
-                    logger.info(f"[DEDUP] {filename} → confirmation timeout, reprocessing")
+                if result.action == "confirm":
+                    # Ask user - pause SSE stream
+                    confirm_token = str(uuid.uuid4())
+                    gate = dedup_svc.create_confirm_gate(confirm_token)
+                    doc  = result.doc
 
-                if action == "reuse":
+                    cached_chunks = dedup_svc._mem_cache.get(
+                        (client_token, dedup_svc.sha256(content)), (None, 0)
+                    )[1]
+                    chunks_stored = (doc.chunks_stored if doc else None) or cached_chunks
+                    yield sse({
+                        "type":          "dedup_confirm",
+                        "confirm_token": confirm_token,
+                        "filename":      filename,
+                        "file_size":     _human_size(len(content)),
+                        "chunks_stored": chunks_stored,
+                        "reason":        result.reason,
+                        "stage":         f"dedup_{i}",
+                    })
+
+                    try:
+                        await asyncio.wait_for(gate.wait(), timeout=dedup_svc.CONFIRM_TIMEOUT_S)
+                        action = dedup_svc.consume_confirm(confirm_token)
+                    except asyncio.TimeoutError:
+                        dedup_svc.consume_confirm(confirm_token)
+                        action = "reprocess"
+                        logger.info(f"[DEDUP] {filename} → confirmation timeout, reprocessing")
+
+                    if action == "reuse":
+                        copied = await dedup_svc.copy_vectors_to_master(result.session_id, master_store)
+                        elapsed = round(time.time() - t1, 2)
+                        logger.info(f"[DEDUP] {filename} → reused, copied {copied} vectors")
+                        # Copy Neo4j graph entities from old session to new master session
+                        _spawn_background(_copy_graph_async(result.session_id, master_session_id))
+
+                        yield sse({"type": "step", "status": "done", "stage": f"dedup_{i}",
+                                   "message": f"{filename} - duplicate detected, reusing existing embeddings",
+                                   "elapsed": elapsed})
+                        await asyncio.sleep(0)
+
+                        yield sse({"type": "step", "status": "start", "stage": f"parse_{i}",
+                                   "title": f"Processing {ext}",
+                                   "message": f"Loading from cache - {filename}"})
+                        await asyncio.sleep(0)
+                        yield sse({"type": "step", "status": "done", "stage": f"parse_{i}",
+                                   "message": f"Source: {filename}",
+                                   "elapsed": 0.0})
+                        await asyncio.sleep(0)
+
+                        yield sse({"type": "step", "status": "start", "stage": f"chunk_{i}",
+                                   "title": "Extracting text",
+                                   "message": "Re-embedding from cached text" if copied == 0 else "Loading chunks from cache"})
+                        await asyncio.sleep(0)
+
+                        if copied == 0:
+                            # Old collection gone - re-embed from already-parsed text (batched)
+                            logger.warning(f"[DEDUP] {filename} → vector copy failed, re-embedding from parsed text")
+                            chunks_with_offsets = chunk_text_with_offsets(text_for_dedup)
+                            batch_texts, batch_metas = [], []
+                            for chunk, start_idx in chunks_with_offsets:
+                                page_number, confidence = find_page(start_idx, page_spans)
+                                batch_metas.append({
+                                    "source":      filename,
+                                    "chunk_index": total_chunks + len(batch_texts),
+                                    "page_number": page_number,
+                                    "confidence":  confidence,
+                                })
+                                batch_texts.append(chunk)
+                            if batch_texts:
+                                try:
+                                    _add_texts_batched(master_store, batch_texts, batch_metas)
+                                except Exception as e:
+                                    logger.error(f"[CHUNK][REUSE] {filename} → embedding failed: {e}")
+                                    yield sse({"type": "error", "stage": f"chunk_{i}",
+                                               "message": f"Failed to embed {filename}. Check your embedding provider (e.g. HuggingFace credits) and try again."})
+                                    return
+                            file_chunks   = len(batch_texts)
+                            total_chunks += file_chunks
+                            logger.info(f"[CHUNK][REUSE] {filename} → re-embedded {file_chunks} chunks into master session={master_session_id}")
+                            dedup_svc.update_cache(client_token, dedup_svc.sha256(content), master_session_id, file_chunks)
+                        else:
+                            file_chunks = copied
+                            total_chunks += copied
+                            logger.info(f"[CHUNK][REUSE] {filename} → copied {file_chunks} chunks from old session={result.session_id} into master session={master_session_id}")
+
+                        page_count = len(set(
+                            p["page_number"] for p in page_spans if p.get("page_number")
+                        )) if page_spans else 1
+                        logger.info(f"[CHUNK][REUSE] {filename} → total_chunks={file_chunks}, pages={page_count}")
+                        yield sse({"type": "step", "status": "done", "stage": f"chunk_{i}",
+                                   "message": f"Extracting the text - {file_chunks} chunks · {page_count} page(s)",
+                                   "elapsed": 0.0})
+                        await asyncio.sleep(0)
+                        continue
+                    # else fall through to process fresh
+
+                elif result.action == "reuse":
+                    # Direct reuse (shouldn't happen with confirm gate, but safety)
                     copied = await dedup_svc.copy_vectors_to_master(result.session_id, master_store)
                     elapsed = round(time.time() - t1, 2)
                     logger.info(f"[DEDUP] {filename} → reused, copied {copied} vectors")
@@ -222,13 +325,13 @@ async def upload_files(
                     _spawn_background(_copy_graph_async(result.session_id, master_session_id))
 
                     yield sse({"type": "step", "status": "done", "stage": f"dedup_{i}",
-                               "message": f"{filename} — duplicate detected, reusing existing embeddings",
+                               "message": f"{filename} - duplicate detected, reusing existing embeddings",
                                "elapsed": elapsed})
                     await asyncio.sleep(0)
 
                     yield sse({"type": "step", "status": "start", "stage": f"parse_{i}",
                                "title": f"Processing {ext}",
-                               "message": f"Loading from cache — {filename}"})
+                               "message": f"Loading from cache - {filename}"})
                     await asyncio.sleep(0)
                     yield sse({"type": "step", "status": "done", "stage": f"parse_{i}",
                                "message": f"Source: {filename}",
@@ -241,7 +344,7 @@ async def upload_files(
                     await asyncio.sleep(0)
 
                     if copied == 0:
-                        # Old collection gone — re-embed from already-parsed text (batched)
+                        # Old collection gone - re-embed from already-parsed text (batched)
                         logger.warning(f"[DEDUP] {filename} → vector copy failed, re-embedding from parsed text")
                         chunks_with_offsets = chunk_text_with_offsets(text_for_dedup)
                         batch_texts, batch_metas = [], []
@@ -276,121 +379,137 @@ async def upload_files(
                     )) if page_spans else 1
                     logger.info(f"[CHUNK][REUSE] {filename} → total_chunks={file_chunks}, pages={page_count}")
                     yield sse({"type": "step", "status": "done", "stage": f"chunk_{i}",
-                               "message": f"Extracting the text — {file_chunks} chunks · {page_count} page(s)",
+                               "message": f"Extracting the text - {file_chunks} chunks · {page_count} page(s)",
                                "elapsed": 0.0})
                     await asyncio.sleep(0)
                     continue
-                # else fall through to process fresh
 
-            elif result.action == "reuse":
-                # Direct reuse (shouldn't happen with confirm gate, but safety)
-                copied = await dedup_svc.copy_vectors_to_master(result.session_id, master_store)
-                total_chunks += copied
+                # ── Process fresh ────────────────────────────────────────────────
                 yield sse({"type": "step", "status": "done", "stage": f"dedup_{i}",
-                           "message": f"{filename} — reused existing embeddings",
+                           "message": f"{filename} - new file, processing",
                            "elapsed": round(time.time() - t1, 2)})
                 await asyncio.sleep(0)
-                continue
 
-            # ── Process fresh ────────────────────────────────────────────────
-            yield sse({"type": "step", "status": "done", "stage": f"dedup_{i}",
-                       "message": f"{filename} — new file, processing",
-                       "elapsed": round(time.time() - t1, 2)})
-            await asyncio.sleep(0)
-
-            # Insert pending DB entry
-            content_hash = dedup_svc.sha256(content)
-            first_c, mid_c, last_c = dedup_svc._extract_chunks(text_for_dedup)
-            db = await asyncio.to_thread(dedup_svc._get_db_session)
-            if db is None:
-                logger.warning(f"[DB] Could not get DB session — skipping pending insert for {filename}")
-            else:
-                try:
-                    success = await asyncio.to_thread(
-                        dedup_svc._insert_pending, db, client_token, master_session_id,
-                        filename.lower(), len(content), content_hash,
-                        first_c, mid_c, last_c, avg_conf
-                    )
-                    if not success:
-                        logger.warning(f"[DB] pending insert returned False for {filename} — record was NOT written to DB")
-                finally:
-                    await asyncio.to_thread(db.close)
-
-            # Parse
-            yield sse({"type": "step", "status": "start", "stage": stage,
-                       "title": f"Processing {ext}",
-                       "message": f"Processing the doc — {filename}"})
-            await asyncio.sleep(0)
-            t1 = time.time()
-            text, page_spans = text_for_dedup, page_spans  # already parsed above
-            elapsed = round(time.time() - t1, 2)
-            logger.info(f"[PARSE] {filename} → reused parsed text")
-            yield sse({"type": "step", "status": "done", "stage": stage,
-                       "message": f"Processing the doc — {filename}", "elapsed": elapsed})
-            await asyncio.sleep(0)
-
-            # Chunk
-            stage_ext = f"chunk_{i}"
-            yield sse({"type": "step", "status": "start", "stage": stage_ext,
-                       "title": "Extracting text", "message": "Extracting the text"})
-            await asyncio.sleep(0)
-            t1 = time.time()
-            chunks_with_offsets = chunk_text_with_offsets(text)
-            batch_texts, batch_metas = [], []
-            for chunk, start_idx in chunks_with_offsets:
-                page_number, confidence = find_page(start_idx, page_spans)
-                batch_metas.append({
-                    "source":      filename,
-                    "chunk_index": total_chunks + len(batch_texts),
-                    "page_number": page_number,
-                    "confidence":  confidence,
-                })
-                batch_texts.append(chunk)
-            if batch_texts:
-                try:
-                    await _add_texts_batched_parallel(master_store, batch_texts, batch_metas)
-                except Exception as e:
-                    logger.error(f"[CHUNK] {filename} → embedding failed: {e}")
-                    yield sse({"type": "error", "stage": stage_ext,
-                               "message": f"Failed to embed {filename}. Check your embedding provider (e.g. HuggingFace credits) and try again."})
-                    return
-            file_chunks   = len(batch_texts)
-            total_chunks += file_chunks
-            elapsed = round(time.time() - t1, 2)
-            logger.info(f"[CHUNK] {filename} → {file_chunks} chunks, {elapsed}s")
-            dedup_svc.update_cache(client_token, content_hash, master_session_id, file_chunks)
-            yield sse({"type": "step", "status": "done", "stage": stage_ext,
-                       "message": f"Extracting the text — {file_chunks} chunks",
-                       "elapsed": elapsed})
-            await asyncio.sleep(0)
-
-            # Build Neo4j graph async (doesn't block SSE stream)
-            _spawn_background(_build_graph_async(batch_texts, master_session_id, filename))
-
-            # Mark complete in DB
-            db = await asyncio.to_thread(dedup_svc._get_db_session)
-            if db is None:
-                logger.warning(f"[DB] Could not get DB session — skipping mark_complete for {filename}")
-            else:
-                try:
-                    await asyncio.to_thread(
-                        dedup_svc._mark_complete, db, client_token, content_hash, file_chunks
-                    )
-                    logger.info(f"[DB] mark_complete succeeded for {filename}")
-                except Exception as e:
-                    logger.warning(f"[DB] mark_complete failed for {filename}: {type(e).__name__}: {e}")
+                # Insert pending DB entry
+                content_hash = dedup_svc.sha256(content)
+                first_c, mid_c, last_c = dedup_svc._extract_chunks(text_for_dedup)
+                db = await asyncio.to_thread(dedup_svc._get_db_session)
+                if db is None:
+                    logger.warning(f"[DB] Could not get DB session - skipping pending insert for {filename}")
+                else:
                     try:
-                        await asyncio.to_thread(dedup_svc._mark_failed, db, client_token, content_hash)
-                    except Exception:
-                        pass
-                finally:
-                    await asyncio.to_thread(db.close)
+                        success = await asyncio.to_thread(
+                            dedup_svc._insert_pending, db, client_token, master_session_id,
+                            filename.lower(), len(content), content_hash,
+                            first_c, mid_c, last_c, avg_conf
+                        )
+                        if success:
+                            pending_files.add((client_token, content_hash))
+                            dedup_svc.register_active(client_token, content_hash)
+                        else:
+                            logger.warning(f"[DB] pending insert returned False for {filename} - record was NOT written to DB")
+                    finally:
+                        await asyncio.to_thread(db.close)
 
-        total = round(time.time() - t0, 2)
-        logger.info(f"[UPLOAD] Complete — session={master_session_id}, chunks={total_chunks}, total={total}s")
-        yield sse({"type": "complete", "session_id": master_session_id,
-                   "files_processed": len(file_data), "total_elapsed": total,
-                   "completion_message": "Document processed"})
+                # Parse
+                yield sse({"type": "step", "status": "start", "stage": stage,
+                           "title": f"Processing {ext}",
+                           "message": f"Processing the doc - {filename}"})
+                await asyncio.sleep(0)
+                t1 = time.time()
+                text, page_spans = text_for_dedup, page_spans  # already parsed above
+                elapsed = round(time.time() - t1, 2)
+                logger.info(f"[PARSE] {filename} → reused parsed text")
+                yield sse({"type": "step", "status": "done", "stage": stage,
+                           "message": f"Processing the doc - {filename}", "elapsed": elapsed})
+                await asyncio.sleep(0)
+
+                # Chunk
+                stage_ext = f"chunk_{i}"
+                yield sse({"type": "step", "status": "start", "stage": stage_ext,
+                           "title": "Extracting text", "message": "Extracting the text"})
+                await asyncio.sleep(0)
+                t1 = time.time()
+                chunks_with_offsets = chunk_text_with_offsets(text)
+                batch_texts, batch_metas = [], []
+                for chunk, start_idx in chunks_with_offsets:
+                    page_number, confidence = find_page(start_idx, page_spans)
+                    batch_metas.append({
+                        "source":      filename,
+                        "chunk_index": total_chunks + len(batch_texts),
+                        "page_number": page_number,
+                        "confidence":  confidence,
+                    })
+                    batch_texts.append(chunk)
+                if batch_texts:
+                    try:
+                        await _add_texts_batched_parallel(master_store, batch_texts, batch_metas)
+                    except Exception as e:
+                        logger.error(f"[CHUNK] {filename} → embedding failed: {e}")
+                        yield sse({"type": "error", "stage": stage_ext,
+                                   "message": f"Failed to embed {filename}. Check your embedding provider (e.g. HuggingFace credits) and try again."})
+                        return
+                file_chunks   = len(batch_texts)
+                total_chunks += file_chunks
+                elapsed = round(time.time() - t1, 2)
+                logger.info(f"[CHUNK] {filename} → {file_chunks} chunks, {elapsed}s")
+                dedup_svc.update_cache(client_token, content_hash, master_session_id, file_chunks)
+                yield sse({"type": "step", "status": "done", "stage": stage_ext,
+                           "message": f"Extracting the text - {file_chunks} chunks",
+                           "elapsed": elapsed})
+                await asyncio.sleep(0)
+
+                # Build Neo4j graph async (doesn't block SSE stream)
+                _spawn_background(_build_graph_async(batch_texts, master_session_id, filename))
+
+                # Mark complete in DB
+                db = await asyncio.to_thread(dedup_svc._get_db_session)
+                if db is None:
+                    logger.warning(f"[DB] Could not get DB session - skipping mark_complete for {filename}")
+                else:
+                    try:
+                        await asyncio.to_thread(
+                            dedup_svc._mark_complete, db, client_token, content_hash, file_chunks
+                        )
+                        logger.info(f"[DB] mark_complete succeeded for {filename}")
+                        pending_files.discard((client_token, content_hash))
+                        dedup_svc.unregister_active(client_token, content_hash)
+                    except Exception as e:
+                        logger.warning(f"[DB] mark_complete failed for {filename}: {type(e).__name__}: {e}")
+                        try:
+                            await asyncio.to_thread(dedup_svc._mark_failed, db, client_token, content_hash)
+                            pending_files.discard((client_token, content_hash))
+                            dedup_svc.unregister_active(client_token, content_hash)
+                        except Exception:
+                            pass
+                    finally:
+                        await asyncio.to_thread(db.close)
+
+            total = round(time.time() - t0, 2)
+            logger.info(f"[UPLOAD] Complete - session={master_session_id}, chunks={total_chunks}, total={total}s")
+            yield sse({"type": "complete", "session_id": master_session_id,
+                       "files_processed": len(file_data), "total_elapsed": total,
+                       "files_skipped": [name for name, _ in skipped_files],
+                       "completion_message": "Document processed"})
+
+        finally:
+            # If the generator exits before all files complete (client refresh/disconnect),
+            # mark any pending DB rows as failed using sync calls only - no await allowed here.
+            if pending_files:
+                _db = dedup_svc._get_db_session()
+                if _db:
+                    try:
+                        for _ct, _ch in pending_files:
+                            dedup_svc.unregister_active(_ct, _ch)
+                            dedup_svc._mark_failed(_db, _ct, _ch)
+                        logger.info(
+                            f"[UPLOAD] Disconnect cleanup - "
+                            f"{len(pending_files)} pending file(s) marked failed"
+                        )
+                    except Exception as _e:
+                        logger.warning(f"[UPLOAD] Failed to cleanup pending on disconnect: {_e}")
+                    finally:
+                        _db.close()
 
     return StreamingResponse(stream(), media_type="text/event-stream", headers=SSE_HEADERS)
 
@@ -405,8 +524,12 @@ async def ingest_url(
     url = request.get("url", "").strip()
     if not url:
         raise HTTPException(400, "url is required")
-    session_id   = str(uuid.uuid4())
+    # Reuse the caller's existing session, same fix as /upload/files and the
+    # connector ingest path - otherwise scraping a second URL into an active
+    # chat would silently orphan whatever was already in it. resolve_session_id
+    # verifies the caller actually owns that session before trusting it.
     client_token = x_client_token or "anonymous"
+    session_id   = dedup_svc.resolve_session_id(request.get("session_id"), client_token) or str(uuid.uuid4())
 
     async def stream() -> AsyncGenerator[str, None]:
         t0 = time.time()
@@ -434,7 +557,7 @@ async def ingest_url(
         chunks = chunk_text(text)
         elapsed = round(time.time() - t1, 2)
         yield sse({"type": "step", "status": "done", "stage": "chunk",
-                   "message": f"Extracting the text — {len(chunks)} chunks", "elapsed": elapsed})
+                   "message": f"Extracting the text - {len(chunks)} chunks", "elapsed": elapsed})
         await asyncio.sleep(0)
 
         yield sse({"type": "step", "status": "start", "stage": "embed",
@@ -464,21 +587,25 @@ async def ingest_url(
 # ── /upload/api ───────────────────────────────────────────────────────────────
 
 @router.post("/api", response_model=IngestResponse)
-async def ingest_api(request: APIIngestRequest):
-    t0         = time.time()
-    session_id = request.session_id or uuid.uuid4()
-    logger.info(f"[API] Starting ingest — url={request.url}, session={session_id}")
+async def ingest_api(request: APIIngestRequest, x_client_token: str = Header(default="anonymous")):
+    t0           = time.time()
+    client_token = x_client_token or "anonymous"
+    # Same ownership check as /upload/files and /upload/url - a caller-supplied
+    # session_id only gets reused if this client_token previously wrote into it.
+    requested    = str(request.session_id) if request.session_id else None
+    session_id   = dedup_svc.resolve_session_id(requested, client_token) or str(uuid.uuid4())
+    logger.info(f"[API] Starting ingest - url={request.url}, session={session_id}")
 
     try:
         text = await fetch_api(request.url, request.headers)
     except Exception as e:
-        logger.error(f"[API] Fetch failed — url={request.url}, error={e}")
+        logger.error(f"[API] Fetch failed - url={request.url}, error={e}")
         raise HTTPException(422, "Failed to fetch data from the API. Please check the URL and headers.")
 
     chunks       = chunk_text(text)
     vector_store = get_vector_store(str(session_id))
     metadatas    = [{"source": request.url, "chunk_index": i} for i in range(len(chunks))]
     vector_store.add_texts(chunks, metadatas=metadatas)
-    logger.info(f"[API] Complete — {len(chunks)} chunks stored, time={time.time()-t0:.2f}s")
+    logger.info(f"[API] Complete - {len(chunks)} chunks stored, time={time.time()-t0:.2f}s")
 
     return IngestResponse(session_id=session_id, message="API data processed and ready for chat")

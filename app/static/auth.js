@@ -265,7 +265,7 @@ async function handleGuest(e) {
 /* ── Typing greeting animation ───────────────────────────────── */
 document.addEventListener('DOMContentLoaded', () => {
   const messages = [
-    "Hi there! I'm ARIA — ask me anything.",
+    "Hi there! I'm ARIA - ask me anything.",
     "Upload your data and I'll answer instantly.",
     "Powered by RAG. Ready when you are.",
   ];

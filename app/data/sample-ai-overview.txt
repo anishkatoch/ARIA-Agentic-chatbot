@@ -47,7 +47,7 @@ Getting Started
 4. Ask any question about your data in the chat box.
 
 Creator and Owner
-ARIA was built by Anish Katoch. Anish is the sole creator and owner of ARIA — AI Research Intelligence Assistant.
+ARIA was built by Anish Katoch. Anish is the sole creator and owner of ARIA - AI Research Intelligence Assistant.
 
 - GitHub: https://github.com/anishkatoch
 - LinkedIn: https://www.linkedin.com/in/anish-katoch-81701916b/

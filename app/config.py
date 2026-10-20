@@ -61,7 +61,7 @@ class _Config:
         self.max_session_size_mb: int   = int(lim.get("max_session_size_mb", 50))
         self.dedup_threshold_mb: float  = float(lim.get("dedup_threshold_mb", 2))
 
-        # ── Secrets — from .env only ─────────────────────────────
+        # ── Secrets - from .env only ─────────────────────────────
         self.groq_api_key: str    = os.getenv("GROQ_API_KEY", "")
         self.openai_api_key: str  = os.getenv("OPENAI_API_KEY", "")
         self.hf_api_key: str      = os.getenv("HUGGINGFACE_API_KEY", "")

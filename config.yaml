@@ -3,12 +3,12 @@ app:
 
 llm:
   provider: groq                          # groq | openai
-  groq_model: openai/gpt-oss-20b         # primary model — fast (confirmed available on this account)
-  intent_model: openai/gpt-oss-20b       # fast model for YES/NO intent check — keeps latency low
+  groq_model: openai/gpt-oss-20b         # primary model - fast (confirmed available on this account)
+  intent_model: openai/gpt-oss-20b       # fast model for YES/NO intent check - keeps latency low
   groq_fallback_models:                  # tried in order when primary fails
     - qwen/qwen3.8-27b                   # mid-size fallback
     - openai/gpt-oss-120b                 # largest/highest quality fallback
-  openai_model: gpt-4o-mini              # last resort — only used if all Groq models exhausted
+  openai_model: gpt-4o-mini              # last resort - only used if all Groq models exhausted
   openai_fallback_enabled: true          # true = fall back to OpenAI after all Groq models fail; false = raise error
 
 embeddings:
@@ -22,7 +22,7 @@ embeddings:
   # next one. All four are forced to the same output dimension (below) so
   # switching never breaks the vector store. free_tokens figures are Voyage's
   # published free-tier allowance per model (confirmed live against the API
-  # on 2026-10-18 — recheck https://docs.voyageai.com/docs/pricing if models
+  # on 2026-10-18 - recheck https://docs.voyageai.com/docs/pricing if models
   # or allowances change).
   voyage_models:
     - model: voyage-4-lite
@@ -34,7 +34,7 @@ embeddings:
     - model: voyage-code-4
       free_tokens: 200000000
   voyage_output_dimension: 1024          # forced on every voyage model above via the API's output_dimension param
-  dimension: 1024                        # voyage (forced)=1024  MiniLM-L6-v2=384  bge-large=1024  openai=1536 — must match provider
+  dimension: 1024                        # voyage (forced)=1024  MiniLM-L6-v2=384  bge-large=1024  openai=1536 - must match provider
 
 retrieval:
   k: 3              # chunks returned to LLM (more = richer context, slower)

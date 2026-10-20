@@ -10,7 +10,7 @@ pinned: false
 
 # RAG Data Assistant
 
-Chat with your data. Upload PDFs, scrape URLs, or pull from JSON APIs — then ask questions and get AI answers grounded in your documents, with cited sources and page numbers.
+Chat with your data. Upload PDFs, scrape URLs, or pull from JSON APIs - then ask questions and get AI answers grounded in your documents, with cited sources and page numbers.
 
 ---
 
@@ -24,12 +24,12 @@ Chat with your data. Upload PDFs, scrape URLs, or pull from JSON APIs — then a
 | **LLM** | Groq `llama-3.1-8b-instant` (primary, free) → 4 Groq fallback models → OpenAI `gpt-4o-mini` (last resort) |
 | **RAG Orchestration** | LangGraph state machine |
 | **Hybrid Search** | BM25 (keyword) + MMR (semantic) → RRF merge → BGE Reranker |
-| **Graph DB** | Neo4j AuraDB — entity & relationship traversal (Advanced Mode) |
+| **Graph DB** | Neo4j AuraDB - entity & relationship traversal (Advanced Mode) |
 | **Vector Store** | ChromaDB local (default) → pgvector on Supabase (optional) |
 | **Embeddings** | `BAAI/bge-large-en-v1.5` via HuggingFace Inference API (free) → OpenAI fallback |
-| **Document Parsing** | LiteParse v2 — Rust-based, page-level metadata, runs off event loop |
+| **Document Parsing** | LiteParse v2 - Rust-based, page-level metadata, runs off event loop |
 | **URL Scraping** | Crawl4AI → Playwright Chromium fallback |
-| **Container** | Docker — Python 3.13-slim, non-root user |
+| **Container** | Docker - Python 3.13-slim, non-root user |
 | **Deployment** | HuggingFace Spaces (free) |
 | **Migrations** | Alembic |
 
@@ -37,21 +37,21 @@ Chat with your data. Upload PDFs, scrape URLs, or pull from JSON APIs — then a
 
 ## How It Works
 
-### Step 1 — Upload (Ingestion)
+### Step 1 - Upload (Ingestion)
 
 When you upload a file, paste a URL, or provide an API endpoint, the system:
 
-1. **Parses** the content — LiteParse v2 extracts text with page numbers and OCR confidence scores per page
-2. **Chunks** the text — splits into overlapping chunks (~1000 chars, 200 overlap) so no context is lost at boundaries
-3. **Embeds** the chunks — converts each chunk to a vector using `BAAI/bge-large-en-v1.5` (batched in groups of 50, 3 batches in parallel for speed)
-4. **Stores** vectors in ChromaDB (or pgvector) — scoped to your session ID so your data stays private
-5. **Builds a knowledge graph** — extracts entities and relationships from each chunk and stores them in Neo4j (used in Advanced Mode)
+1. **Parses** the content - LiteParse v2 extracts text with page numbers and OCR confidence scores per page
+2. **Chunks** the text - splits into overlapping chunks (~1000 chars, 200 overlap) so no context is lost at boundaries
+3. **Embeds** the chunks - converts each chunk to a vector using `BAAI/bge-large-en-v1.5` (batched in groups of 50, 3 batches in parallel for speed)
+4. **Stores** vectors in ChromaDB (or pgvector) - scoped to your session ID so your data stays private
+5. **Builds a knowledge graph** - extracts entities and relationships from each chunk and stores them in Neo4j (used in Advanced Mode)
 
 Every step streams live progress to the UI via Server-Sent Events.
 
 ---
 
-### Step 2 — Ask a Question (RAG Pipeline)
+### Step 2 - Ask a Question (RAG Pipeline)
 
 When you send a message, the system runs a LangGraph state machine. There are two modes:
 
@@ -65,34 +65,34 @@ Your message
 Is this a question about the documents, or just small talk?
 Uses a fast LLM call (YES / NO only).
       |
-      +-- NO --> Direct LLM reply (greetings, general chat — no retrieval needed)
+      +-- NO --> Direct LLM reply (greetings, general chat - no retrieval needed)
       |
       +-- YES
             |
             v
-      [HyDE — Hypothetical Document Embedding]
+      [HyDE - Hypothetical Document Embedding]
       The LLM generates a hypothetical answer to your question.
-      That hypothetical answer is used as the search query —
+      That hypothetical answer is used as the search query -
       it matches the shape and vocabulary of real document chunks
       far better than the raw question does.
       (Runs in parallel with the intent check to save time.)
             |
             v
       [Hybrid Retrieval]
-      BM25 (keyword search) — finds exact matches: clause numbers,
+      BM25 (keyword search) - finds exact matches: clause numbers,
         dates, amounts, names
       +
-      MMR (vector search) — finds semantically similar chunks
+      MMR (vector search) - finds semantically similar chunks
         even if the wording differs
       Both return top 7 candidates each.
             |
             v
-      [RRF — Reciprocal Rank Fusion]
+      [RRF - Reciprocal Rank Fusion]
       Merges BM25 and MMR results by rank position, not score.
       No normalisation needed. Produces a single ranked list.
             |
             v
-      [BGE Reranker — BAAI/bge-reranker-large]
+      [BGE Reranker - BAAI/bge-reranker-large]
       Cross-encoder: scores every (question, chunk) pair directly.
       Picks the top 5 chunks that best answer your specific question.
             |
@@ -111,7 +111,7 @@ Advanced Mode replaces HyDE with Query Rewriting and adds Neo4j graph traversal 
 Your message
       |
       v
-[Intent Check] — same as above
+[Intent Check] - same as above
       |
       +-- YES
             |
@@ -157,7 +157,7 @@ Your message
 
 #### Thinking Mode (toggle in the UI)
 
-Thinking Mode replaces the LangGraph pipeline with a **ReAct agent** (Reason + Act loop). The agent shows its reasoning step by step before answering — useful when you want to see exactly how the answer was derived.
+Thinking Mode replaces the LangGraph pipeline with a **ReAct agent** (Reason + Act loop). The agent shows its reasoning step by step before answering - useful when you want to see exactly how the answer was derived.
 
 ```
 Your message
@@ -178,7 +178,7 @@ Your message
 [Final Answer]  Response with citations
 ```
 
-**Clarification:** When you have 2+ documents uploaded and ask a vague question (e.g. "who is the victim?" when two different case files are loaded), the agent can ask a clarifying question instead of guessing. This only triggers when the question is genuinely ambiguous across multiple sources — the system uses hard code-level checks before the agent even sees the option, so it never over-asks or asks twice.
+**Clarification:** When you have 2+ documents uploaded and ask a vague question (e.g. "who is the victim?" when two different case files are loaded), the agent can ask a clarifying question instead of guessing. This only triggers when the question is genuinely ambiguous across multiple sources - the system uses hard code-level checks before the agent even sees the option, so it never over-asks or asks twice.
 
 ---
 
@@ -192,7 +192,7 @@ Assistant: "Sure! Clause 3 says..."
 You:       "yup"
 ```
 
-On "yup", the intent check sees the full conversation history, understands it refers to the previous document question, retrieves clause 3, and answers — rather than treating "yup" as a standalone message.
+On "yup", the intent check sees the full conversation history, understands it refers to the previous document question, retrieves clause 3, and answers - rather than treating "yup" as a standalone message.
 
 ---
 
@@ -214,13 +214,13 @@ llama3-70b-8192
 OpenAI gpt-4o-mini       <-- last resort (requires OPENAI_API_KEY)
 ```
 
-All models use `max_retries=0` so there are no 25-second SDK waits — our own fallback code kicks in immediately. The full chain is configurable in `config.yaml`.
+All models use `max_retries=0` so there are no 25-second SDK waits - our own fallback code kicks in immediately. The full chain is configurable in `config.yaml`.
 
 ---
 
 ### Answer Cache
 
-Identical questions (same session, same question text, same mode) are served from an in-memory cache. No LLM call, no retrieval — instant response. Cache holds 256 entries, keyed by MD5 of `session_id + question + mode`.
+Identical questions (same session, same question text, same mode) are served from an in-memory cache. No LLM call, no retrieval - instant response. Cache holds 256 entries, keyed by MD5 of `session_id + question + mode`.
 
 ---
 
@@ -246,7 +246,10 @@ cp env.example .env
 uv run alembic upgrade head
 
 # 6. Start the server
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
+# --reload-exclude keeps the file-watcher off logs/ - otherwise every log line
+# written re-triggers the watcher, which re-triggers a restart (and a new log
+# line), in a near-continuous self-restart loop.
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload --reload-exclude "logs/*"
 ```
 
 Open `http://localhost:8001` in your browser.
@@ -258,23 +261,23 @@ Open `http://localhost:8001` in your browser.
 Copy `env.example` to `.env` and fill in your values.
 
 ```env
-# Groq — primary LLM (free)
+# Groq - primary LLM (free)
 GROQ_API_KEY=gsk_...
 
-# OpenAI — fallback LLM (optional)
+# OpenAI - fallback LLM (optional)
 OPENAI_API_KEY=sk-...
 
-# HuggingFace — embeddings (free)
+# HuggingFace - embeddings (free)
 HUGGINGFACE_API_KEY=hf_...
 
-# Supabase pgvector — optional, falls back to ChromaDB if not set
+# Supabase pgvector - optional, falls back to ChromaDB if not set
 DB_HOST=db.<your-ref>.supabase.co
 DB_PORT=5432
 DB_USER=postgres
 DB_PASSWORD=your-password
 DB_NAME=postgres
 
-# Neo4j AuraDB — optional, only needed for Advanced Mode
+# Neo4j AuraDB - optional, only needed for Advanced Mode
 NEO4J_URI=neo4j+s://xxxxx.databases.neo4j.io
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your-password
@@ -282,23 +285,23 @@ NEO4J_PASSWORD=your-password
 APP_ENV=development
 ```
 
-Model names, retrieval tuning, and upload limits are all in `config.yaml` — edit there, no code changes needed.
+Model names, retrieval tuning, and upload limits are all in `config.yaml` - edit there, no code changes needed.
 
 ---
 
 ## Features
 
-- **File upload** — PDF, DOC, DOCX, TXT. Drag & drop supported. Up to 5 files, 50 MB total per session.
-- **URL scraping** — paste any URL and chat with the page content. Handles JS-rendered pages.
-- **JSON API ingestion** — point at any API endpoint, add auth headers if needed.
-- **Cited answers** — every answer shows source file, page number, and OCR confidence.
-- **Thinking Mode** — ReAct agent that shows step-by-step reasoning. Includes clarification when your question is genuinely ambiguous across multiple documents.
-- **Advanced Mode** — toggle in the chat UI for deeper answers using graph traversal.
-- **Multi-turn chat** — follow-up messages use full conversation context.
-- **Real-time upload progress** — each step (parse → chunk → embed → store) streams live.
-- **Automatic fallbacks** — LLM, embeddings, and vector store all have fallback providers.
-- **Zero cold starts** — embeddings, BM25 index, reranker, and document parser are all pre-loaded at server startup so the first user after a restart gets instant responses.
-- **Auth** — Supabase OTP email login or continue as guest. Chat and upload routes are protected; only the auth page is public.
+- **File upload** - PDF, DOC, DOCX, TXT. Drag & drop supported. Up to 5 files, 50 MB total per session.
+- **URL scraping** - paste any URL and chat with the page content. Handles JS-rendered pages.
+- **JSON API ingestion** - point at any API endpoint, add auth headers if needed.
+- **Cited answers** - every answer shows source file, page number, and OCR confidence.
+- **Thinking Mode** - ReAct agent that shows step-by-step reasoning. Includes clarification when your question is genuinely ambiguous across multiple documents.
+- **Advanced Mode** - toggle in the chat UI for deeper answers using graph traversal.
+- **Multi-turn chat** - follow-up messages use full conversation context.
+- **Real-time upload progress** - each step (parse → chunk → embed → store) streams live.
+- **Automatic fallbacks** - LLM, embeddings, and vector store all have fallback providers.
+- **Zero cold starts** - embeddings, BM25 index, reranker, and document parser are all pre-loaded at server startup so the first user after a restart gets instant responses.
+- **Auth** - Supabase OTP email login or continue as guest. Chat and upload routes are protected; only the auth page is public.
 
 ---
 
@@ -306,19 +309,19 @@ Model names, retrieval tuning, and upload limits are all in `config.yaml` — ed
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/health` | Health check — `{"status": "ok"}` |
+| `GET` | `/health` | Health check - `{"status": "ok"}` |
 | `POST` | `/auth/send-otp` | Send OTP email for login |
-| `POST` | `/auth/verify-otp` | Verify OTP — returns JWT |
+| `POST` | `/auth/verify-otp` | Verify OTP - returns JWT |
 | `POST` | `/auth/guest` | Get a guest token (no email needed) |
-| `POST` | `/upload/files` | Upload PDF/DOC/DOCX/TXT — streams SSE progress |
-| `POST` | `/upload/url` | Scrape a URL — streams SSE progress |
+| `POST` | `/upload/files` | Upload PDF/DOC/DOCX/TXT - streams SSE progress |
+| `POST` | `/upload/url` | Scrape a URL - streams SSE progress |
 | `POST` | `/upload/api` | Fetch a JSON API with optional auth headers |
-| `POST` | `/chat/` | Ask a question — returns answer + citations + elapsed_ms |
+| `POST` | `/chat/` | Ask a question - returns answer + citations + elapsed_ms |
 
 **Upload/Chat headers:**
-- `Authorization: Bearer <token>` — required on all `/upload/` and `/chat/` routes
-- `X-Advanced-Mode: true` — enables Advanced Mode pipeline
-- `X-Thinking-Mode: true` — enables Thinking Mode (ReAct agent with step-by-step reasoning)
+- `Authorization: Bearer <token>` - required on all `/upload/` and `/chat/` routes
+- `X-Advanced-Mode: true` - enables Advanced Mode pipeline
+- `X-Thinking-Mode: true` - enables Thinking Mode (ReAct agent with step-by-step reasoning)
 
 ---
 

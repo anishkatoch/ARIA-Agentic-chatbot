@@ -18,7 +18,7 @@ target_metadata = Base.metadata
 def run_migrations_offline() -> None:
     url = cfg.db_url
     if not url:
-        raise RuntimeError("DB_HOST is not set — cannot run migrations offline")
+        raise RuntimeError("DB_HOST is not set - cannot run migrations offline")
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -32,7 +32,7 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     url = cfg.db_url
     if not url:
-        raise RuntimeError("DB_HOST is not set — cannot run migrations")
+        raise RuntimeError("DB_HOST is not set - cannot run migrations")
     connectable = create_engine(url, poolclass=pool.NullPool)
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)

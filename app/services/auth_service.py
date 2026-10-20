@@ -51,7 +51,7 @@ def verify_guest_token(token: str) -> dict | None:
 
 def signup(name: str, email: str, password: str) -> dict:
     sb = _supabase()
-    # Step 1 — create the account (no confirmation email if "Confirm email" is OFF in Supabase)
+    # Step 1 - create the account (no confirmation email if "Confirm email" is OFF in Supabase)
     try:
         res = sb.auth.sign_up({
             "email": email,
@@ -66,9 +66,9 @@ def signup(name: str, email: str, password: str) -> dict:
             raise ValueError("Too many attempts on this email. Wait a few minutes or use a different email address.")
         raise ValueError(f"Sign up failed: {e}")
     if res.user is None:
-        raise ValueError("Sign up failed — please try again.")
+        raise ValueError("Sign up failed - please try again.")
 
-    # Supabase sign_up() already sends the OTP — no second call needed
+    # Supabase sign_up() already sends the OTP - no second call needed
     logger.info(f"[AUTH] Signup done, OTP sent by Supabase: {email}")
     return {
         "token": None,
@@ -113,7 +113,7 @@ def signin(email: str, password: str) -> dict:
     except Exception as e:
         msg = str(e).lower()
         if "email not confirmed" in msg:
-            raise ValueError("Please confirm your email first — check your inbox for the confirmation link.")
+            raise ValueError("Please confirm your email first - check your inbox for the confirmation link.")
         if "invalid login" in msg or "invalid credentials" in msg or "wrong password" in msg:
             raise ValueError("Invalid email or password.")
         raise ValueError(f"Sign in failed: {e}")

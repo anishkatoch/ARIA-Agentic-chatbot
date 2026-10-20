@@ -1,4 +1,6 @@
 import logging
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 from langchain_core.embeddings import Embeddings
 from langchain_openai import OpenAIEmbeddings
 from langchain_postgres.vectorstores import PGVector
@@ -8,17 +10,45 @@ from app.config import cfg
 
 logger = logging.getLogger(__name__)
 
+# One shared connection pool for every session's PGVector store, instead of
+# each session opening (and cold-starting) its own pool against Supabase.
+_db_engine: Engine | None = None
+
+
+def _get_db_engine() -> Engine:
+    global _db_engine
+    if _db_engine is None:
+        _db_engine = create_engine(cfg.db_url, pool_pre_ping=True)
+    return _db_engine
+
 
 _PROVIDERS = {}  # populated below, after each _try_* is defined
 
+# Embedding provider selection doesn't depend on session_id, so one instance
+# serves every session - skips re-resolving the provider (incl. a DB lookup
+# for Voyage's active-model tracking) on every call.
+_embeddings_cache = None
+
 
 def get_embeddings():
+    global _embeddings_cache
+    if _embeddings_cache is not None:
+        return _embeddings_cache
+
     logger.info(f"[EMBED] Provider priority: {cfg.embedding_provider}")
     primary = _PROVIDERS.get(cfg.embedding_provider, _try_bge)
     fallbacks = [fn for name, fn in _PROVIDERS.items() if fn is not primary]
     for try_fn in [primary, *fallbacks]:
         embeddings = try_fn()
         if embeddings:
+            # Only cache the primary provider. If it's temporarily down and a
+            # fallback had to be used instead, don't cache that fallback -
+            # otherwise it would stick for the rest of the process's life
+            # even after the primary recovers (e.g. Voyage's quota resets or
+            # its payment method issue is fixed), defeating the whole point
+            # of _DynamicVoyageEmbeddings' auto-recovery design.
+            if try_fn is primary:
+                _embeddings_cache = embeddings
             return embeddings
     return None
 
@@ -80,9 +110,14 @@ class _DynamicVoyageEmbeddings(Embeddings):
                 return result.embeddings
             except Exception as e:
                 last_exc = e
-                err = str(e).lower()
-                if any(s in err for s in ("credit", "402", "payment", "quota")):
+                http_status = getattr(e, "http_status", None)
+                if http_status == 402:
+                    # Payment Required - the model's free quota is actually used up.
                     mark_exhausted(model, provider="voyage")
+                elif http_status == 429:
+                    # Rate-limited (e.g. no payment method on file yet) - transient,
+                    # don't disable the model, just move on for this call.
+                    logger.warning(f"[EMBED] Voyage model {model} rate-limited ({e}), trying next")
                 else:
                     mark_broken(model, str(e), provider="voyage")
                 logger.warning(f"[EMBED] Voyage model {model} failed ({e}), trying next")
@@ -106,7 +141,7 @@ def _try_voyage():
         if active is None:
             raise RuntimeError("All configured Voyage models have exhausted their free quota or are broken")
         embeddings = _DynamicVoyageEmbeddings(models)
-        logger.info(f"[EMBED] Using Voyage AI — active model: {active} ({cfg.voyage_output_dimension} dims, auto-fallback across {[m['model'] for m in models]})")
+        logger.info(f"[EMBED] Using Voyage AI - active model: {active} ({cfg.voyage_output_dimension} dims, auto-fallback across {[m['model'] for m in models]})")
         return embeddings
     except Exception as e:
         logger.warning(f"[EMBED] Voyage unavailable ({e})")
@@ -120,18 +155,42 @@ _PROVIDERS = {
 }
 
 
+# Once a session has data it only ever gains more (nothing deletes documents
+# from a live session), so "has data" never flips back to False - caching
+# only the True result sidesteps needing to invalidate this from every
+# upload/ingest call site.
+_has_data_cache: dict[str, bool] = {}
+
+
 def session_has_data(session_id: str) -> bool:
     """Return True if the session's vector store has at least one document."""
+    if _has_data_cache.get(session_id):
+        return True
     try:
         store = get_vector_store(session_id)
-        results = store.similarity_search("a", k=1)
-        return len(results) > 0
+        if hasattr(store, "_collection"):
+            # Chroma - local count, no embedding call needed.
+            result = store._collection.count() > 0
+        else:
+            result = len(store.similarity_search("a", k=1)) > 0
     except Exception:
-        return False
+        result = False
+    if result:
+        _has_data_cache[session_id] = True
+    return result
+
+
+# Connecting PGVector/Chroma re-runs schema setup (CREATE EXTENSION/TABLE IF
+# NOT EXISTS, etc.) against the DB every time it's constructed - caching per
+# session means that cost is paid once per process, not once per chat message.
+_store_cache: dict[str, object] = {}
 
 
 def get_vector_store(session_id: str):
-    logger.info(f"[STORE] Initialising vector store — session={session_id}")
+    if session_id in _store_cache:
+        return _store_cache[session_id]
+
+    logger.info(f"[STORE] Initialising vector store - session={session_id}")
     embeddings = get_embeddings()
     if not embeddings:
         logger.error("[STORE] No embedding provider available")
@@ -144,17 +203,23 @@ def get_vector_store(session_id: str):
             store = PGVector(
                 embeddings=embeddings,
                 collection_name=collection,
-                connection=cfg.db_url,
+                connection=_get_db_engine(),
             )
-            logger.info(f"[STORE] Connected to pgvector (Supabase) — collection={collection}")
+            logger.info(f"[STORE] Connected to pgvector (Supabase) - collection={collection}")
+            _store_cache[session_id] = store
             return store
         except Exception as e:
-            logger.warning(f"[STORE] pgvector unavailable ({e}) — falling back to ChromaDB")
+            logger.warning(f"[STORE] pgvector unavailable ({e}) - falling back to ChromaDB")
 
+    # Not cached: a transient pgvector outage must not permanently pin this
+    # session to Chroma for the rest of the process's life. Leaving this
+    # uncached means the next call retries pgvector fresh, instead of this
+    # session's documents silently ending up split across two different
+    # backing stores once Supabase recovers.
     store = Chroma(
         collection_name=collection,
         embedding_function=embeddings,
         persist_directory="./chroma_data",
     )
-    logger.info(f"[STORE] Using ChromaDB (local) — collection={collection}")
+    logger.info(f"[STORE] Using ChromaDB (local) - collection={collection}")
     return store

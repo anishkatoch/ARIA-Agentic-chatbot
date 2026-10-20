@@ -14,13 +14,13 @@ def _get_driver():
     if _driver is not None:
         return _driver
     if not cfg.neo4j_uri or not cfg.neo4j_password:
-        logger.warning("[GRAPH] Neo4j credentials not set — graph store disabled")
+        logger.warning("[GRAPH] Neo4j credentials not set - graph store disabled")
         return None
     try:
         from neo4j import GraphDatabase
         _driver = GraphDatabase.driver(cfg.neo4j_uri, auth=(cfg.neo4j_user, cfg.neo4j_password))
         _driver.verify_connectivity()
-        logger.info(f"[GRAPH] Connected to Neo4j — uri={cfg.neo4j_uri}")
+        logger.info(f"[GRAPH] Connected to Neo4j - uri={cfg.neo4j_uri}")
         return _driver
     except Exception as e:
         logger.warning(f"[GRAPH] Neo4j connection failed: {e}")
@@ -84,7 +84,7 @@ def build_graph(chunks: list[str], session_id: str, llm) -> bool:
                     entity=entity, sid=session_id, etype=etype, rel=rel, target=target,
                 )
 
-        logger.info(f"[GRAPH] Built graph for session={session_id} — {len(all_triples)} triples")
+        logger.info(f"[GRAPH] Built graph for session={session_id} - {len(all_triples)} triples")
         return True
     except Exception as e:
         logger.warning(f"[GRAPH] build_graph failed for session={session_id}: {e}")

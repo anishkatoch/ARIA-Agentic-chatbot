@@ -39,7 +39,7 @@ def _parse_with_liteparse(tmp_path: str) -> tuple[str, list[dict]]:
 
 
 def _get_docling_converter():
-    # Imported lazily — Docling pulls in heavy ML deps and downloads models
+    # Imported lazily - Docling pulls in heavy ML deps and downloads models
     # on first use, so we only pay that cost when LiteParse actually fails.
     global _docling_converter
     if _docling_converter is None:
@@ -82,12 +82,12 @@ def _parse_with_docling(tmp_path: str) -> tuple[str, list[dict]]:
 async def parse_file(content: bytes, filename: str) -> tuple[str, list[dict]]:
     ext = os.path.splitext(filename)[1].lower()
     size_kb = len(content) / 1024
-    logger.info(f"[PARSE] Starting — file={filename}, size={size_kb:.1f} KB, type={ext}")
+    logger.info(f"[PARSE] Starting - file={filename}, size={size_kb:.1f} KB, type={ext}")
     t0 = time.time()
 
-    if ext == ".txt":
+    if ext in (".txt", ".md"):
         text = content.decode("utf-8", errors="ignore")
-        logger.info(f"[PARSE] Done (plain text) — chars={len(text)}, time={time.time()-t0:.2f}s")
+        logger.info(f"[PARSE] Done (plain text) - chars={len(text)}, time={time.time()-t0:.2f}s")
         page_spans = [{"page_number": 1, "start": 0, "end": len(text), "confidence": None}]
         return text, page_spans
 
@@ -98,13 +98,26 @@ async def parse_file(content: bytes, filename: str) -> tuple[str, list[dict]]:
 
     tmp_path = await asyncio.to_thread(_write_tmp)
     try:
-        # Run in thread pool — both parsers are CPU-bound and would block the event loop
+        if ext in (".xlsx", ".xls", ".csv"):
+            # LiteParse is a PDF/DOCX page-layout parser with no spreadsheet
+            # support - it would fail on every single one of these, so go
+            # straight to Docling (which has native xlsx/xls/csv backends)
+            # instead of paying for a doomed first attempt.
+            try:
+                full_text, page_spans = await asyncio.to_thread(_parse_with_docling, tmp_path)
+            except Exception as docling_error:
+                logger.error(f"[PARSE] Docling failed on {filename} ({docling_error})")
+                raise RuntimeError(f"Failed to parse {filename}: {docling_error}") from docling_error
+            logger.info(f"[PARSE] Done (Docling) - pages={len(page_spans)}, chars={len(full_text)}, time={time.time()-t0:.2f}s")
+            return full_text, page_spans
+
+        # Run in thread pool - both parsers are CPU-bound and would block the event loop
         try:
             full_text, page_spans = await asyncio.to_thread(_parse_with_liteparse, tmp_path)
-            logger.info(f"[PARSE] Done (LiteParse) — pages={len(page_spans)}, chars={len(full_text)}, time={time.time()-t0:.2f}s")
+            logger.info(f"[PARSE] Done (LiteParse) - pages={len(page_spans)}, chars={len(full_text)}, time={time.time()-t0:.2f}s")
             return full_text, page_spans
         except Exception as liteparse_error:
-            logger.warning(f"[PARSE] LiteParse failed ({liteparse_error}) — falling back to Docling")
+            logger.warning(f"[PARSE] LiteParse failed ({liteparse_error}) - falling back to Docling")
 
         try:
             full_text, page_spans = await asyncio.to_thread(_parse_with_docling, tmp_path)
@@ -115,51 +128,51 @@ async def parse_file(content: bytes, filename: str) -> tuple[str, list[dict]]:
                 f"(Docling error: {docling_error})"
             ) from docling_error
 
-        logger.info(f"[PARSE] Done (Docling fallback) — pages={len(page_spans)}, chars={len(full_text)}, time={time.time()-t0:.2f}s")
+        logger.info(f"[PARSE] Done (Docling fallback) - pages={len(page_spans)}, chars={len(full_text)}, time={time.time()-t0:.2f}s")
         return full_text, page_spans
     finally:
         os.unlink(tmp_path)
 
 
 async def scrape_url(url: str) -> str:
-    logger.info(f"[SCRAPE] Starting — url={url}")
+    logger.info(f"[SCRAPE] Starting - url={url}")
     t0 = time.time()
     try:
         from crawl4ai import AsyncWebCrawler
         async with AsyncWebCrawler() as crawler:
             result = await crawler.arun(url=url)
             if result.markdown:
-                logger.info(f"[SCRAPE] Done (Crawl4AI) — chars={len(result.markdown)}, time={time.time()-t0:.2f}s")
+                logger.info(f"[SCRAPE] Done (Crawl4AI) - chars={len(result.markdown)}, time={time.time()-t0:.2f}s")
                 return result.markdown
             raise ValueError("Empty content from Crawl4AI")
     except Exception as e:
-        logger.warning(f"[SCRAPE] Crawl4AI failed ({e}) — falling back to Playwright")
+        logger.warning(f"[SCRAPE] Crawl4AI failed ({e}) - falling back to Playwright")
         return await _scrape_with_playwright(url, t0)
 
 
 async def _scrape_with_playwright(url: str, t0: float = None) -> str:
     if t0 is None:
         t0 = time.time()
-    logger.info(f"[SCRAPE] Playwright launching — url={url}")
+    logger.info(f"[SCRAPE] Playwright launching - url={url}")
     async with async_playwright() as p:
         browser = await p.chromium.launch()
         page    = await browser.new_page()
         await page.goto(url, wait_until="networkidle")
         content = await page.inner_text("body")
         await browser.close()
-    logger.info(f"[SCRAPE] Done (Playwright) — chars={len(content)}, time={time.time()-t0:.2f}s")
+    logger.info(f"[SCRAPE] Done (Playwright) - chars={len(content)}, time={time.time()-t0:.2f}s")
     return content
 
 
 async def fetch_api(url: str, headers: dict[str, str] | None = None) -> str:
-    logger.info(f"[API] Fetching — url={url}, auth_headers={'yes' if headers else 'none'}")
+    logger.info(f"[API] Fetching - url={url}, auth_headers={'yes' if headers else 'none'}")
     t0 = time.time()
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.get(url, headers=headers or {})
         response.raise_for_status()
         data = response.json()
     text = _flatten_json(data)
-    logger.info(f"[API] Done — status={response.status_code}, chars={len(text)}, time={time.time()-t0:.2f}s")
+    logger.info(f"[API] Done - status={response.status_code}, chars={len(text)}, time={time.time()-t0:.2f}s")
     return text
 
 

@@ -43,7 +43,7 @@ html, body {
 }
 
 /* ══════════════════════════════════════════════════════
-   SPLIT LAYOUT — one unified dark canvas, no partition
+   SPLIT LAYOUT - one unified dark canvas, no partition
 ══════════════════════════════════════════════════════ */
 .auth-page {
   display: flex;
@@ -85,7 +85,7 @@ html, body {
   transition: flex 0.35s ease, padding 0.35s ease;
 }
 
-/* Orb elements kept in HTML but invisible — page-level glows replace them */
+/* Orb elements kept in HTML but invisible - page-level glows replace them */
 .al-orb { display: none; }
 
 /* Brand */
@@ -299,7 +299,7 @@ html, body {
   40%         { transform: translateY(-5px); opacity: 1; }
 }
 
-/* Staggered animation delays — fast enough to feel alive from first load */
+/* Staggered animation delays - fast enough to feel alive from first load */
 .msg-1 { animation-delay: 0.2s; }
 .msg-2 { animation-duration: 0.9s; animation-delay: 0.7s; }
 .msg-3 { animation-delay: 1.8s; }
@@ -331,7 +331,7 @@ html, body {
 
 
 /* ══════════════════════════════════════════════════════
-   RIGHT PANEL — transparent, card floats on shared bg
+   RIGHT PANEL - transparent, card floats on shared bg
 ══════════════════════════════════════════════════════ */
 .auth-right {
   flex: 1;
@@ -345,7 +345,7 @@ html, body {
   z-index: 1;
 }
 
-/* Auth card — glassmorphism on the dark canvas */
+/* Auth card - glassmorphism on the dark canvas */
 .auth-card {
   width: 100%;
   max-width: 480px;

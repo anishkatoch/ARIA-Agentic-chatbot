@@ -2,11 +2,11 @@
 Tests for the clarification / correction feature in Thinking Mode.
 
 Covers:
-  1. Clarification flag store — set, get, default
-  2. Gate 1 — clarify blocked when only 1 distinct source
-  3. Gate 2 — clarify blocked when already asked last turn
-  4. Gate 1+2 pass — clarify_allowed=True with 2+ sources, no prior ask
-  5. ReAct Clarify action is terminal — returns immediately, sets flag
+  1. Clarification flag store - set, get, default
+  2. Gate 1 - clarify blocked when only 1 distinct source
+  3. Gate 2 - clarify blocked when already asked last turn
+  4. Gate 1+2 pass - clarify_allowed=True with 2+ sources, no prior ask
+  5. ReAct Clarify action is terminal - returns immediately, sets flag
   6. History saved after clarification response
   7. Correction rules exist in _ARIA_SYSTEM
   8. Single apology rule exists in _ARIA_SYSTEM
@@ -51,7 +51,7 @@ class TestClarifFlag:
         assert _clarif_was_asked("sess-e") is False
 
 
-# ── 2. Gate 1 — blocked when only 1 source ───────────────────────────────────
+# ── 2. Gate 1 - blocked when only 1 source ───────────────────────────────────
 
 class TestGate1SingleSource:
 
@@ -103,7 +103,7 @@ class TestGate1SingleSource:
         assert len(distinct) < 2, "Empty source metadata must not count as multi-source"
 
 
-# ── 3. Gate 2 — blocked when already clarified last turn ──────────────────────
+# ── 3. Gate 2 - blocked when already clarified last turn ──────────────────────
 
 class TestGate2AlreadyClarified:
 
@@ -176,7 +176,7 @@ class TestCombinedGates:
 
 # ── 5. ReAct Clarify tool is terminal ─────────────────────────────────────────
 # The ReAct agent is now a real tool-calling agent (langchain.agents.create_agent),
-# not text parsing — so these tests mock at the create_agent boundary and simulate
+# not text parsing - so these tests mock at the create_agent boundary and simulate
 # the model choosing to call the clarify tool, rather than mocking llm_invoke
 # (which _react_answer no longer calls at all).
 
@@ -242,7 +242,7 @@ class TestReActClarifyTerminal:
         assert _clarif_was_asked("react-test-2") is True, "Flag must be set after clarify() fires"
 
     def test_clarify_tool_absent_when_not_allowed(self):
-        """When clarify_allowed=False, the clarify tool must not even be registered —
+        """When clarify_allowed=False, the clarify tool must not even be registered -
         the model has no way to call it, by construction, not by output filtering."""
         from app.services.rag import _react_tools
 
@@ -346,7 +346,7 @@ class TestSystemPromptRules:
 
 
 # ── 9 & 10. Clarify tool registration controlled by flag ─────────────────────
-# With real tool-calling, "is clarify in the prompt" is no longer meaningful —
+# With real tool-calling, "is clarify in the prompt" is no longer meaningful -
 # tools are registered via the API, not described in text. The equivalent,
 # architecturally correct check is whether the clarify tool is in the tools
 # list build_react_tools() returns, and what its docstring (the model's only

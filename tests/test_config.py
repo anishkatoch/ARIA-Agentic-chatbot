@@ -93,7 +93,7 @@ class TestDbUrl:
             "DB_USER": "admin", "DB_PASSWORD": "p@ss#word!", "DB_NAME": "mydb",
         })
         url = instance.db_url
-        # Special chars must be URL-encoded — no raw @ inside the credentials part
+        # Special chars must be URL-encoded - no raw @ inside the credentials part
         creds_part = url.split("://")[1].split("@")[0]
         assert "@" not in creds_part
 

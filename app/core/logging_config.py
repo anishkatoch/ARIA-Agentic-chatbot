@@ -13,7 +13,7 @@ def setup_logging():
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # Rotating file — 10 MB per file, keep last 5
+    # Rotating file - 10 MB per file, keep last 5
     file_handler = logging.handlers.RotatingFileHandler(
         filename=log_dir / "app.log",
         maxBytes=10 * 1024 * 1024,
