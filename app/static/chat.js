@@ -34,7 +34,26 @@ document.addEventListener('DOMContentLoaded', () => {
   setupDragDrop();
   setupFileInput();
   setupHeadersToggle();
+  checkOAuthReturn();
 });
+
+// The OAuth callback (gmail/google-drive/salesforce) redirects back here
+// with ?connected=<provider> instead of leaving the browser on a bare JSON
+// page - this reopens the connectors panel straight to the fresh,
+// already-connected status, instead of the user having to navigate back and
+// manually reload it themselves.
+function checkOAuthReturn() {
+  const params = new URLSearchParams(location.search);
+  const provider = params.get('connected');
+  if (!provider) return;
+
+  const url = new URL(location.href);
+  url.searchParams.delete('connected');
+  history.replaceState({}, '', url);
+
+  toggleConnectorsView();
+  toast(`${provider.replace(/_/g, ' ')} connected!`, 'success');
+}
 
 function initTheme() {
   const dark = localStorage.getItem('aria_dark_mode') === 'true';
@@ -834,17 +853,30 @@ function renderConnectors() {
 }
 
 function connectorRowHtml(c) {
+  // For both oauth and byok, "connected" means THIS user has their own
+  // credential on file - a clean two-state toggle, same shape for both:
+  // not connected -> Connect only; connected -> Browse + Disconnect. To
+  // switch accounts/keys, Disconnect first, then Connect again.
   const badge = c.connected
     ? '<span class="connector-badge connected">Connected</span>'
     : (c.configured
-        ? (c.auth === 'oauth' ? '<span class="connector-badge not-connected">Not connected</span>' : '')
+        ? ((c.auth === 'oauth' || c.auth === 'byok') ? '<span class="connector-badge not-connected">Not connected</span>' : '')
         : '<span class="connector-badge not-configured">Not configured</span>');
 
-  const action = (c.auth === 'oauth')
-    ? (c.connected
-        ? `<button class="connector-action-btn" onclick="toggleBrowse('${c.id}')">Browse</button>`
-        : `<button class="connector-action-btn" ${c.configured ? '' : 'disabled'} onclick="connectOAuth('${c.path}')">Connect</button>`)
-    : `<button class="connector-action-btn" ${c.configured ? '' : 'disabled'} onclick="toggleBrowse('${c.id}')">Browse</button>`;
+  let action;
+  if (c.auth === 'oauth') {
+    action = c.connected
+      ? `<button class="connector-action-btn" onclick="toggleBrowse('${c.id}')">Browse</button>
+         <button class="connector-action-btn secondary" onclick="disconnectOAuth('${c.path}')">Disconnect</button>`
+      : `<button class="connector-action-btn" ${c.configured ? '' : 'disabled'} onclick="connectOAuth('${c.path}')">Connect</button>`;
+  } else if (c.auth === 'byok') {
+    action = c.connected
+      ? `<button class="connector-action-btn" onclick="toggleBrowse('${c.id}')">Browse</button>
+         <button class="connector-action-btn secondary" onclick="disconnectOAuth('${c.path}')">Disconnect</button>`
+      : `<button class="connector-action-btn" onclick="openCredentialsForm('${c.id}')">Connect</button>`;
+  } else {
+    action = `<button class="connector-action-btn" ${c.configured ? '' : 'disabled'} onclick="toggleBrowse('${c.id}')">Browse</button>`;
+  }
 
   return `
     <div class="connector-row">
@@ -854,8 +886,10 @@ function connectorRowHtml(c) {
           <div class="connector-name">${escHtml(c.name)}</div>
           <div class="connector-sub">${escHtml(c.type.replace(/_/g, ' '))}</div>
         </div>
-        ${badge}
-        ${action}
+        <div class="connector-row-actions">
+          ${badge}
+          ${action}
+        </div>
       </div>
     </div>`;
 }
@@ -869,6 +903,91 @@ async function connectOAuth(path) {
     window.location.href = data.auth_url;
   } catch (e) {
     toast(e.message, 'error');
+  }
+}
+
+// Clears the stored token for this provider, then reloads the list so the
+// row flips back to its "Connect" state - clicking Connect again goes
+// through the provider's account-chooser / re-login prompt (not a silent
+// same-account reauth), so this is how a user switches which account is
+// linked, not just how they unlink one.
+async function disconnectOAuth(path) {
+  try {
+    const res = await fetch(`/connectors/${path}/disconnect`, { method: 'POST', headers: connectorHeaders() });
+    if (handleAuthError(res)) return;
+    if (handleConnectorsLockError(res)) return;
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
+    toast('Disconnected', 'success');
+    // We just got a 200 back from the disconnect call itself - no need to
+    // pay for another full /connectors/status round-trip just to find out
+    // what we already know. Update this one row in place instead.
+    const c = state.connectors.find(x => x.path === path);
+    if (c) {
+      c.connected = false;
+      c.own_credentials = false;
+      renderConnectors();
+    }
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+// Opens a form (in the same modal Browse uses) for a byok connector's
+// per-provider credential fields, from /status's credential_fields - so this
+// one function handles GitHub (1 field), Jira (3 fields), ServiceNow
+// (3 fields), and Azure DevOps (2 fields) without hardcoding any of them.
+function openCredentialsForm(id) {
+  const meta = state.connectors.find(c => c.id === id);
+  if (!meta || !meta.credential_fields) return;
+
+  document.getElementById('connector-modal-title').textContent = `Connect your own ${meta.name}`;
+  const fieldsHtml = meta.credential_fields.map(f => `
+    <label class="field-label" for="cred-${f.key}">${escHtml(f.label)}</label>
+    <input type="${f.type === 'password' ? 'password' : 'text'}" id="cred-${f.key}" class="text-input"
+           placeholder="${escAttr(f.placeholder || '')}" autocomplete="off" />
+  `).join('');
+  document.getElementById('connector-modal-body').innerHTML = `
+    <div class="connector-browse-note">Your key is stored for your account only and never shared with other users.</div>
+    ${fieldsHtml}
+    <button class="connector-action-btn" onclick="submitCredentials('${id}')">Save &amp; Connect</button>
+    <div class="connector-browse-note" id="cred-error"></div>
+  `;
+
+  document.getElementById('connector-modal').classList.remove('hidden');
+  document.addEventListener('keydown', _connectorModalEscHandler);
+}
+
+async function submitCredentials(id) {
+  const meta = state.connectors.find(c => c.id === id);
+  if (!meta || !meta.credential_fields) return;
+  const errEl = document.getElementById('cred-error');
+  errEl.textContent = '';
+
+  const body = {};
+  for (const f of meta.credential_fields) {
+    body[f.key] = document.getElementById(`cred-${f.key}`).value.trim();
+  }
+
+  try {
+    const res = await fetch(`/connectors/${meta.path}/credentials`, {
+      method: 'POST',
+      headers: connectorHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (handleAuthError(res)) return;
+    if (handleConnectorsLockError(res)) return;
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
+    closeConnectorModal();
+    toast('Connected', 'success');
+    // Same as disconnectOAuth: the save call already told us this worked,
+    // so update this one row in place instead of a full status refetch.
+    meta.connected = true;
+    meta.own_credentials = true;
+    renderConnectors();
+  } catch (e) {
+    errEl.textContent = e.message;
   }
 }
 
@@ -916,31 +1035,52 @@ function closeConnectorModal() {
   document.removeEventListener('keydown', _connectorModalEscHandler);
 }
 
-/* ── File Share browser ──────────────────────────────────────── */
-async function browseFileShare(path) {
-  const el = document.getElementById('connector-browse-file_share');
+/* ── Shared connector-browse fetch/render skeleton ───────────────
+   Used by every non-paginated browse*() function below: shows "Loading…",
+   fetches the given URL, checks for an auth error, parses the JSON
+   response, and renders whatever HTML the caller's `render(data)` callback
+   returns - the one thing (loading state, fetch+headers, auth check,
+   JSON parse, ok-check, error catch) that was identically repeated in
+   every browse function. Each connector keeps its own `render` callback
+   verbatim (crumbs, row markup, empty-state text all differ per
+   connector), so nothing about what gets displayed changes, only where
+   the repeated plumbing around it lives. Gmail's and Google Drive's
+   browsers aren't built on this - they support "load more" pagination
+   (append mode, a running next-page-token), which is a genuinely
+   different shape this skeleton doesn't try to force-fit. */
+async function renderConnectorBrowse(elementId, url, render) {
+  const el = document.getElementById(elementId);
   el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
   try {
-    const res = await fetch(`/connectors/file-share/files?path=${encodeURIComponent(path)}`, { headers: connectorHeaders() });
+    const res = await fetch(url, { headers: connectorHeaders() });
     if (handleAuthError(res)) return;
     const data = await safeJson(res);
     if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
-
-    const crumbs = breadcrumbHtml(path, p => `browseFileShare('${escAttr(p)}')`);
-    const rows = (data.items || []).map(item => item.type === 'folder'
-      ? `<div class="connector-item-row is-folder" onclick="browseFileShare('${escAttr(item.path)}')">
-           <span class="ci-name">📁 ${escHtml(item.name)}</span>
-         </div>`
-      : `<div class="connector-item-row" onclick="ingestFileShareFile('${escAttr(item.path)}', '${escAttr(item.name)}')">
-           <span class="ci-name">📄 ${escHtml(item.name)}</span>
-           <span class="ci-meta">${item.size != null ? formatBytes(item.size) : ''}</span>
-         </div>`
-    ).join('') || '<div class="connector-browse-note">Empty folder</div>';
-
-    el.innerHTML = crumbs + rows;
+    el.innerHTML = render(data);
   } catch (e) {
     el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
   }
+}
+
+/* ── File Share browser ──────────────────────────────────────── */
+async function browseFileShare(path) {
+  await renderConnectorBrowse(
+    'connector-browse-file_share',
+    `/connectors/file-share/files?path=${encodeURIComponent(path)}`,
+    data => {
+      const crumbs = breadcrumbHtml(path, p => `browseFileShare('${escAttr(p)}')`);
+      const rows = (data.items || []).map(item => item.type === 'folder'
+        ? `<div class="connector-item-row is-folder" onclick="browseFileShare('${escAttr(item.path)}')">
+             <span class="ci-name">📁 ${escHtml(item.name)}</span>
+           </div>`
+        : `<div class="connector-item-row" onclick="ingestFileShareFile('${escAttr(item.path)}', '${escAttr(item.name)}')">
+             <span class="ci-name">📄 ${escHtml(item.name)}</span>
+             <span class="ci-meta">${item.size != null ? formatBytes(item.size) : ''}</span>
+           </div>`
+      ).join('') || '<div class="connector-browse-note">Empty folder</div>';
+      return crumbs + rows;
+    },
+  );
 }
 
 async function ingestFileShareFile(path, name) {
@@ -949,41 +1089,31 @@ async function ingestFileShareFile(path, name) {
 
 /* ── LMS browser ─────────────────────────────────────────────── */
 async function browseLmsCourses() {
-  const el = document.getElementById('connector-browse-lms');
-  el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
-  try {
-    const res = await fetch('/connectors/lms/courses', { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
-    el.innerHTML = (data.items || []).map(c => `
+  await renderConnectorBrowse(
+    'connector-browse-lms',
+    '/connectors/lms/courses',
+    data => (data.items || []).map(c => `
       <div class="connector-item-row is-folder" onclick="browseLmsFiles('${escAttr(c.id)}', '${escAttr(c.name)}')">
         <span class="ci-name">📁 ${escHtml(c.name)}</span>
         <span class="ci-meta">${c.module_count} modules</span>
-      </div>`).join('') || '<div class="connector-browse-note">No courses</div>';
-  } catch (e) {
-    el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
-  }
+      </div>`).join('') || '<div class="connector-browse-note">No courses</div>',
+  );
 }
 
 async function browseLmsFiles(courseId, courseName) {
-  const el = document.getElementById('connector-browse-lms');
-  el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
-  try {
-    const res = await fetch(`/connectors/lms/courses/${encodeURIComponent(courseId)}/files`, { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
-    const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseLmsCourses()">Courses</a> / ${escHtml(courseName)}</div>`;
-    const rows = (data.items || []).map(f => `
-      <div class="connector-item-row" onclick="ingestLmsFile('${escAttr(f.id)}', '${escAttr(f.name)}')">
-        <span class="ci-name">📄 ${escHtml(f.name)}</span>
-        <span class="ci-meta">${f.size != null ? formatBytes(f.size) : ''}</span>
-      </div>`).join('') || '<div class="connector-browse-note">No files in this course</div>';
-    el.innerHTML = crumbs + rows;
-  } catch (e) {
-    el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
-  }
+  await renderConnectorBrowse(
+    'connector-browse-lms',
+    `/connectors/lms/courses/${encodeURIComponent(courseId)}/files`,
+    data => {
+      const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseLmsCourses()">Courses</a> / ${escHtml(courseName)}</div>`;
+      const rows = (data.items || []).map(f => `
+        <div class="connector-item-row" onclick="ingestLmsFile('${escAttr(f.id)}', '${escAttr(f.name)}')">
+          <span class="ci-name">📄 ${escHtml(f.name)}</span>
+          <span class="ci-meta">${f.size != null ? formatBytes(f.size) : ''}</span>
+        </div>`).join('') || '<div class="connector-browse-note">No files in this course</div>';
+      return crumbs + rows;
+    },
+  );
 }
 
 async function ingestLmsFile(fileId, name) {
@@ -992,61 +1122,47 @@ async function ingestLmsFile(fileId, name) {
 
 /* ── GitHub browser ──────────────────────────────────────────── */
 async function browseGithubRepos() {
-  const el = document.getElementById('connector-browse-github');
-  el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
-  try {
-    const res = await fetch('/connectors/github/repos?per_page=100', { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
-    el.innerHTML = (data.items || []).map(r => `
+  await renderConnectorBrowse(
+    'connector-browse-github',
+    '/connectors/github/repos?per_page=100',
+    data => (data.items || []).map(r => `
       <div class="connector-item-row is-folder" onclick="browseGithubContents('${escAttr(r.owner)}', '${escAttr(r.name)}', '${escAttr(r.default_branch)}', '')">
         <span class="ci-name">📁 ${escHtml(r.full_name)}</span>
         <span class="ci-meta">${r.private ? 'Private' : 'Public'}</span>
-      </div>`).join('') || '<div class="connector-browse-note">No repositories</div>';
-  } catch (e) {
-    el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
-  }
+      </div>`).join('') || '<div class="connector-browse-note">No repositories</div>',
+  );
 }
 
 async function browseGithubContents(owner, repo, ref, path) {
-  const el = document.getElementById('connector-browse-github');
-  el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
-  try {
-    const params = new URLSearchParams({ path });
-    if (ref) params.set('ref', ref);
-    const res = await fetch(
-      `/connectors/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents?${params}`,
-      { headers: connectorHeaders() },
-    );
-    if (handleAuthError(res)) return;
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
+  const params = new URLSearchParams({ path });
+  if (ref) params.set('ref', ref);
+  await renderConnectorBrowse(
+    'connector-browse-github',
+    `/connectors/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents?${params}`,
+    data => {
+      const crumbs = [
+        `<a class="crumb" onclick="browseGithubRepos()">Repos</a>`,
+        `<a class="crumb" onclick="browseGithubContents('${escAttr(owner)}', '${escAttr(repo)}', '${escAttr(ref)}', '')">${escHtml(owner)}/${escHtml(repo)}</a>`,
+      ];
+      let acc = '';
+      path.split('/').filter(Boolean).forEach(p => {
+        acc = acc ? `${acc}/${p}` : p;
+        crumbs.push(`<a class="crumb" onclick="browseGithubContents('${escAttr(owner)}', '${escAttr(repo)}', '${escAttr(ref)}', '${escAttr(acc)}')">${escHtml(p)}</a>`);
+      });
 
-    const crumbs = [
-      `<a class="crumb" onclick="browseGithubRepos()">Repos</a>`,
-      `<a class="crumb" onclick="browseGithubContents('${escAttr(owner)}', '${escAttr(repo)}', '${escAttr(ref)}', '')">${escHtml(owner)}/${escHtml(repo)}</a>`,
-    ];
-    let acc = '';
-    path.split('/').filter(Boolean).forEach(p => {
-      acc = acc ? `${acc}/${p}` : p;
-      crumbs.push(`<a class="crumb" onclick="browseGithubContents('${escAttr(owner)}', '${escAttr(repo)}', '${escAttr(ref)}', '${escAttr(acc)}')">${escHtml(p)}</a>`);
-    });
+      const rows = (data.items || []).map(item => item.type === 'dir'
+        ? `<div class="connector-item-row is-folder" onclick="browseGithubContents('${escAttr(owner)}', '${escAttr(repo)}', '${escAttr(ref)}', '${escAttr(item.path)}')">
+             <span class="ci-name">📁 ${escHtml(item.name)}</span>
+           </div>`
+        : `<div class="connector-item-row" onclick="ingestGithubFile('${escAttr(owner)}', '${escAttr(repo)}', '${escAttr(item.path)}', '${escAttr(ref)}', '${escAttr(item.name)}')">
+             <span class="ci-name">📄 ${escHtml(item.name)}</span>
+             <span class="ci-meta">${item.size != null ? formatBytes(item.size) : ''}</span>
+           </div>`
+      ).join('') || '<div class="connector-browse-note">Empty folder</div>';
 
-    const rows = (data.items || []).map(item => item.type === 'dir'
-      ? `<div class="connector-item-row is-folder" onclick="browseGithubContents('${escAttr(owner)}', '${escAttr(repo)}', '${escAttr(ref)}', '${escAttr(item.path)}')">
-           <span class="ci-name">📁 ${escHtml(item.name)}</span>
-         </div>`
-      : `<div class="connector-item-row" onclick="ingestGithubFile('${escAttr(owner)}', '${escAttr(repo)}', '${escAttr(item.path)}', '${escAttr(ref)}', '${escAttr(item.name)}')">
-           <span class="ci-name">📄 ${escHtml(item.name)}</span>
-           <span class="ci-meta">${item.size != null ? formatBytes(item.size) : ''}</span>
-         </div>`
-    ).join('') || '<div class="connector-browse-note">Empty folder</div>';
-
-    el.innerHTML = `<div class="connector-breadcrumb">${crumbs.join(' / ')}</div>` + rows;
-  } catch (e) {
-    el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
-  }
+      return `<div class="connector-breadcrumb">${crumbs.join(' / ')}</div>` + rows;
+    },
+  );
 }
 
 async function ingestGithubFile(owner, repo, path, ref, name) {
@@ -1091,29 +1207,36 @@ async function browseGmailMessages(pageToken = '', append = false) {
 }
 
 async function browseGmailMessage(messageId, subject) {
-  const el = document.getElementById('connector-browse-gmail');
-  el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
-  try {
-    const res = await fetch(`/connectors/gmail/messages/${encodeURIComponent(messageId)}`, { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
-
-    const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseGmailMessages()">Inbox</a> / ${escHtml(subject)}</div>`;
-    const rows = (data.attachments || []).map(a => `
-      <div class="connector-item-row" onclick="ingestGmailAttachment('${escAttr(messageId)}', '${escAttr(a.attachment_id)}', '${escAttr(a.filename)}')">
-        <span class="ci-name">📎 ${escHtml(a.filename)}</span>
-        <span class="ci-meta">${a.size != null ? formatBytes(a.size) : ''}</span>
-      </div>`).join('') || '<div class="connector-browse-note">No attachments in this email - only attachments can be added right now.</div>';
-
-    el.innerHTML = crumbs + rows;
-  } catch (e) {
-    el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
-  }
+  await renderConnectorBrowse(
+    'connector-browse-gmail',
+    `/connectors/gmail/messages/${encodeURIComponent(messageId)}`,
+    data => {
+      const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseGmailMessages()">Inbox</a> / ${escHtml(subject)}</div>`;
+      // Ingesting a message always pulls in the body text plus every
+      // attachment's extracted text, combined into one document - there's
+      // no per-attachment picking, so attachments are listed here just for
+      // visibility, not as separate clickable actions.
+      const attachments = data.attachments || [];
+      const addLabel = attachments.length
+        ? `Add this email (body + ${attachments.length} attachment${attachments.length > 1 ? 's' : ''})`
+        : 'Add this email';
+      const addRow = `
+        <div class="connector-item-row">
+          <span class="ci-name">✉️ ${escHtml(subject)}</span>
+          <button class="connector-action-btn" onclick="event.stopPropagation(); ingestGmailEmail('${escAttr(messageId)}', '${escAttr(subject)}')">${escHtml(addLabel)}</button>
+        </div>`;
+      const attachmentRows = attachments.map(a => `
+        <div class="connector-item-row">
+          <span class="ci-name">📎 ${escHtml(a.filename)}</span>
+          <span class="ci-meta">${a.size != null ? formatBytes(a.size) : ''}</span>
+        </div>`).join('');
+      return crumbs + addRow + attachmentRows;
+    },
+  );
 }
 
-async function ingestGmailAttachment(messageId, attachmentId, filename) {
-  await runConnectorIngest('gmail', { message_id: messageId, attachment_id: attachmentId, filename }, filename);
+async function ingestGmailEmail(messageId, subject) {
+  await runConnectorIngest('gmail', { message_id: messageId }, subject || 'email');
 }
 
 /* ── Google Drive browser ────────────────────────────────────── */
@@ -1184,44 +1307,32 @@ async function ingestGoogleDriveFile(fileId, name) {
 
 /* ── Jira browser ─────────────────────────────────────────────── */
 async function browseJiraProjects() {
-  const el = document.getElementById('connector-browse-jira');
-  el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
-  try {
-    const res = await fetch('/connectors/jira/projects', { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
-    el.innerHTML = (data.projects || []).map(p => `
+  await renderConnectorBrowse(
+    'connector-browse-jira',
+    '/connectors/jira/projects',
+    data => (data.projects || []).map(p => `
       <div class="connector-item-row is-folder" onclick="browseJiraIssues('${escAttr(p.key)}', '${escAttr(p.name)}')">
         <span class="ci-name">📁 ${escHtml(p.name)}</span>
         <span class="ci-meta">${escHtml(p.key)}</span>
-      </div>`).join('') || '<div class="connector-browse-note">No projects</div>';
-  } catch (e) {
-    el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
-  }
+      </div>`).join('') || '<div class="connector-browse-note">No projects</div>',
+  );
 }
 
 async function browseJiraIssues(projectKey, projectName) {
-  const el = document.getElementById('connector-browse-jira');
-  el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
-  try {
-    const jql = `project = ${projectKey} order by created DESC`;
-    const res = await fetch(`/connectors/jira/issues?jql=${encodeURIComponent(jql)}&max_results=20`, { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
-
-    const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseJiraProjects()">Projects</a> / ${escHtml(projectName)}</div>`;
-    const rows = (data.issues || []).map(i => `
-      <div class="connector-item-row" onclick="ingestJiraIssue('${escAttr(i.key)}', '${escAttr(i.summary)}')">
-        <span class="ci-name">🎫 ${escHtml(i.key)} - ${escHtml(i.summary)}</span>
-        <span class="ci-meta">${escHtml(i.status)}</span>
-      </div>`).join('') || '<div class="connector-browse-note">No issues in this project</div>';
-
-    el.innerHTML = crumbs + rows;
-  } catch (e) {
-    el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
-  }
+  const jql = `project = ${projectKey} order by created DESC`;
+  await renderConnectorBrowse(
+    'connector-browse-jira',
+    `/connectors/jira/issues?jql=${encodeURIComponent(jql)}&max_results=20`,
+    data => {
+      const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseJiraProjects()">Projects</a> / ${escHtml(projectName)}</div>`;
+      const rows = (data.issues || []).map(i => `
+        <div class="connector-item-row" onclick="ingestJiraIssue('${escAttr(i.key)}', '${escAttr(i.summary)}')">
+          <span class="ci-name">🎫 ${escHtml(i.key)} - ${escHtml(i.summary)}</span>
+          <span class="ci-meta">${escHtml(i.status)}</span>
+        </div>`).join('') || '<div class="connector-browse-note">No issues in this project</div>';
+      return crumbs + rows;
+    },
+  );
 }
 
 async function ingestJiraIssue(issueKey, summary) {
@@ -1231,21 +1342,15 @@ async function ingestJiraIssue(issueKey, summary) {
 /* ── ServiceNow browser ───────────────────────────────────────── */
 // Flat list - no drill-down needed, pick an incident straight from the list.
 async function browseServiceNowIncidents() {
-  const el = document.getElementById('connector-browse-servicenow');
-  el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
-  try {
-    const res = await fetch('/connectors/servicenow/incidents?max_results=25', { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
-    el.innerHTML = (data.incidents || []).map(i => `
+  await renderConnectorBrowse(
+    'connector-browse-servicenow',
+    '/connectors/servicenow/incidents?max_results=25',
+    data => (data.incidents || []).map(i => `
       <div class="connector-item-row" onclick="ingestServiceNowIncident('${escAttr(i.sys_id)}', '${escAttr(i.number)}', '${escAttr(i.short_description)}')">
         <span class="ci-name">🛠️ ${escHtml(i.number)} - ${escHtml(i.short_description)}</span>
         <span class="ci-meta">${escHtml(i.state)}${i.priority ? ' · ' + escHtml(i.priority) : ''}</span>
-      </div>`).join('') || '<div class="connector-browse-note">No incidents</div>';
-  } catch (e) {
-    el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
-  }
+      </div>`).join('') || '<div class="connector-browse-note">No incidents</div>',
+  );
 }
 
 async function ingestServiceNowIncident(sysId, number, shortDescription) {
@@ -1276,25 +1381,19 @@ function sfRecordMeta(sobject, r) {
 
 async function browseSalesforceRecords(categoryKey) {
   const cat = SF_CATEGORIES.find(c => c.key === categoryKey);
-  const el = document.getElementById('connector-browse-salesforce');
-  el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
-  try {
-    const res = await fetch(`/connectors/salesforce/${cat.key}?max_results=20`, { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
-
-    const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseSalesforceCategories()">Salesforce</a> / ${escHtml(cat.label)}</div>`;
-    const rows = (data.records || []).map(r => `
-      <div class="connector-item-row" onclick="ingestSalesforceRecord('${escAttr(cat.sobject)}', '${escAttr(r.Id)}', '${escAttr(r.Name || r.Id)}')">
-        <span class="ci-name">${escHtml(r.Name || r.Id)}</span>
-        <span class="ci-meta">${escHtml(sfRecordMeta(cat.sobject, r))}</span>
-      </div>`).join('') || `<div class="connector-browse-note">No ${escHtml(cat.label.toLowerCase())}</div>`;
-
-    el.innerHTML = crumbs + rows;
-  } catch (e) {
-    el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
-  }
+  await renderConnectorBrowse(
+    'connector-browse-salesforce',
+    `/connectors/salesforce/${cat.key}?max_results=20`,
+    data => {
+      const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseSalesforceCategories()">Salesforce</a> / ${escHtml(cat.label)}</div>`;
+      const rows = (data.records || []).map(r => `
+        <div class="connector-item-row" onclick="ingestSalesforceRecord('${escAttr(cat.sobject)}', '${escAttr(r.Id)}', '${escAttr(r.Name || r.Id)}')">
+          <span class="ci-name">${escHtml(r.Name || r.Id)}</span>
+          <span class="ci-meta">${escHtml(sfRecordMeta(cat.sobject, r))}</span>
+        </div>`).join('') || `<div class="connector-browse-note">No ${escHtml(cat.label.toLowerCase())}</div>`;
+      return crumbs + rows;
+    },
+  );
 }
 
 async function ingestSalesforceRecord(sobject, recordId, name) {
@@ -1305,42 +1404,30 @@ async function ingestSalesforceRecord(sobject, recordId, name) {
 let _spState = { siteId: '', siteName: '', driveId: '', driveName: '', trail: [] };
 
 async function browseSharepointSites() {
-  const el = document.getElementById('connector-browse-sharepoint');
-  el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
-  try {
-    const res = await fetch('/connectors/sharepoint/sites', { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
-    el.innerHTML = (data.value || []).map(s => `
+  await renderConnectorBrowse(
+    'connector-browse-sharepoint',
+    '/connectors/sharepoint/sites',
+    data => (data.value || []).map(s => `
       <div class="connector-item-row is-folder" onclick="browseSharepointDrives('${escAttr(s.id)}', '${escAttr(s.displayName || s.name)}')">
         <span class="ci-name">📁 ${escHtml(s.displayName || s.name)}</span>
-      </div>`).join('') || '<div class="connector-browse-note">No sites</div>';
-  } catch (e) {
-    el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
-  }
+      </div>`).join('') || '<div class="connector-browse-note">No sites</div>',
+  );
 }
 
 async function browseSharepointDrives(siteId, siteName) {
   _spState = { siteId, siteName, driveId: '', driveName: '', trail: [] };
-  const el = document.getElementById('connector-browse-sharepoint');
-  el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
-  try {
-    const res = await fetch(`/connectors/sharepoint/sites/${encodeURIComponent(siteId)}/drives`, { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
-
-    const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseSharepointSites()">Sites</a> / ${escHtml(siteName)}</div>`;
-    const rows = (data.value || []).map(d => `
-      <div class="connector-item-row is-folder" onclick="browseSharepointOpenDrive('${escAttr(d.id)}', '${escAttr(d.name)}')">
-        <span class="ci-name">📁 ${escHtml(d.name)}</span>
-      </div>`).join('') || '<div class="connector-browse-note">No document libraries on this site</div>';
-
-    el.innerHTML = crumbs + rows;
-  } catch (e) {
-    el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
-  }
+  await renderConnectorBrowse(
+    'connector-browse-sharepoint',
+    `/connectors/sharepoint/sites/${encodeURIComponent(siteId)}/drives`,
+    data => {
+      const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseSharepointSites()">Sites</a> / ${escHtml(siteName)}</div>`;
+      const rows = (data.value || []).map(d => `
+        <div class="connector-item-row is-folder" onclick="browseSharepointOpenDrive('${escAttr(d.id)}', '${escAttr(d.name)}')">
+          <span class="ci-name">📁 ${escHtml(d.name)}</span>
+        </div>`).join('') || '<div class="connector-browse-note">No document libraries on this site</div>';
+      return crumbs + rows;
+    },
+  );
 }
 
 async function browseSharepointOpenDrive(driveId, driveName) {
@@ -1361,38 +1448,30 @@ async function browseSharepointCrumb(index) {
 }
 
 async function loadSharepointItems() {
-  const el = document.getElementById('connector-browse-sharepoint');
-  el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
   const current = _spState.trail[_spState.trail.length - 1];
-  try {
-    const res = await fetch(
-      `/connectors/sharepoint/drives/${encodeURIComponent(_spState.driveId)}/items?folder_id=${encodeURIComponent(current.id)}`,
-      { headers: connectorHeaders() },
-    );
-    if (handleAuthError(res)) return;
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
+  await renderConnectorBrowse(
+    'connector-browse-sharepoint',
+    `/connectors/sharepoint/drives/${encodeURIComponent(_spState.driveId)}/items?folder_id=${encodeURIComponent(current.id)}`,
+    data => {
+      const crumbs = [
+        `<a class="crumb" onclick="browseSharepointSites()">Sites</a>`,
+        `<a class="crumb" onclick="browseSharepointDrives('${escAttr(_spState.siteId)}', '${escAttr(_spState.siteName)}')">${escHtml(_spState.siteName)}</a>`,
+        ..._spState.trail.map((t, i) => `<a class="crumb" onclick="browseSharepointCrumb(${i})">${escHtml(t.name)}</a>`),
+      ];
 
-    const crumbs = [
-      `<a class="crumb" onclick="browseSharepointSites()">Sites</a>`,
-      `<a class="crumb" onclick="browseSharepointDrives('${escAttr(_spState.siteId)}', '${escAttr(_spState.siteName)}')">${escHtml(_spState.siteName)}</a>`,
-      ..._spState.trail.map((t, i) => `<a class="crumb" onclick="browseSharepointCrumb(${i})">${escHtml(t.name)}</a>`),
-    ];
+      const rows = (data.value || []).map(item => item.folder
+        ? `<div class="connector-item-row is-folder" onclick="browseSharepointOpenFolder('${escAttr(item.id)}', '${escAttr(item.name)}')">
+             <span class="ci-name">📁 ${escHtml(item.name)}</span>
+           </div>`
+        : `<div class="connector-item-row" onclick="ingestSharepointFile('${escAttr(item.id)}', '${escAttr(item.name)}')">
+             <span class="ci-name">📄 ${escHtml(item.name)}</span>
+             <span class="ci-meta">${item.size != null ? formatBytes(item.size) : ''}</span>
+           </div>`
+      ).join('') || '<div class="connector-browse-note">Empty folder</div>';
 
-    const rows = (data.value || []).map(item => item.folder
-      ? `<div class="connector-item-row is-folder" onclick="browseSharepointOpenFolder('${escAttr(item.id)}', '${escAttr(item.name)}')">
-           <span class="ci-name">📁 ${escHtml(item.name)}</span>
-         </div>`
-      : `<div class="connector-item-row" onclick="ingestSharepointFile('${escAttr(item.id)}', '${escAttr(item.name)}')">
-           <span class="ci-name">📄 ${escHtml(item.name)}</span>
-           <span class="ci-meta">${item.size != null ? formatBytes(item.size) : ''}</span>
-         </div>`
-    ).join('') || '<div class="connector-browse-note">Empty folder</div>';
-
-    el.innerHTML = `<div class="connector-breadcrumb">${crumbs.join(' / ')}</div>` + rows;
-  } catch (e) {
-    el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
-  }
+      return `<div class="connector-breadcrumb">${crumbs.join(' / ')}</div>` + rows;
+    },
+  );
 }
 
 async function ingestSharepointFile(itemId, name) {
@@ -1404,43 +1483,31 @@ async function ingestSharepointFile(itemId, name) {
 // ingestable unit, so each channel row carries an explicit "Add" action
 // instead of opening a deeper level.
 async function browseTeamsList() {
-  const el = document.getElementById('connector-browse-teams');
-  el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
-  try {
-    const res = await fetch('/connectors/teams/list', { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
-    el.innerHTML = (data.value || []).map(t => `
+  await renderConnectorBrowse(
+    'connector-browse-teams',
+    '/connectors/teams/list',
+    data => (data.value || []).map(t => `
       <div class="connector-item-row is-folder" onclick="browseTeamsChannels('${escAttr(t.id)}', '${escAttr(t.displayName)}')">
         <span class="ci-name">📁 ${escHtml(t.displayName)}</span>
-      </div>`).join('') || '<div class="connector-browse-note">No teams</div>';
-  } catch (e) {
-    el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
-  }
+      </div>`).join('') || '<div class="connector-browse-note">No teams</div>',
+  );
 }
 
 async function browseTeamsChannels(teamId, teamName) {
-  const el = document.getElementById('connector-browse-teams');
-  el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
-  try {
-    const res = await fetch(`/connectors/teams/${encodeURIComponent(teamId)}/channels`, { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
-
-    const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseTeamsList()">Teams</a> / ${escHtml(teamName)}</div>`;
-    const rows = (data.value || []).map(c => `
-      <div class="connector-item-row">
-        <span class="ci-name">💬 ${escHtml(c.displayName)}</span>
-        <span class="ci-meta">${escHtml(c.membershipType || '')}</span>
-        <button class="connector-action-btn" onclick="event.stopPropagation(); ingestTeamsChannel('${escAttr(teamId)}', '${escAttr(c.id)}', '${escAttr(teamName)}', '${escAttr(c.displayName)}')">Add this channel</button>
-      </div>`).join('') || '<div class="connector-browse-note">No channels in this team</div>';
-
-    el.innerHTML = crumbs + rows;
-  } catch (e) {
-    el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
-  }
+  await renderConnectorBrowse(
+    'connector-browse-teams',
+    `/connectors/teams/${encodeURIComponent(teamId)}/channels`,
+    data => {
+      const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseTeamsList()">Teams</a> / ${escHtml(teamName)}</div>`;
+      const rows = (data.value || []).map(c => `
+        <div class="connector-item-row">
+          <span class="ci-name">💬 ${escHtml(c.displayName)}</span>
+          <span class="ci-meta">${escHtml(c.membershipType || '')}</span>
+          <button class="connector-action-btn" onclick="event.stopPropagation(); ingestTeamsChannel('${escAttr(teamId)}', '${escAttr(c.id)}', '${escAttr(teamName)}', '${escAttr(c.displayName)}')">Add this channel</button>
+        </div>`).join('') || '<div class="connector-browse-note">No channels in this team</div>';
+      return crumbs + rows;
+    },
+  );
 }
 
 async function ingestTeamsChannel(teamId, channelId, teamName, channelName) {
@@ -1449,82 +1516,62 @@ async function ingestTeamsChannel(teamId, channelId, teamName, channelName) {
 
 /* ── Azure DevOps Repos browser ──────────────────────────────── */
 async function browseAzureDevOpsProjects() {
-  const el = document.getElementById('connector-browse-azure_devops');
-  el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
-  try {
-    const res = await fetch('/connectors/azure-devops/projects', { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
-    el.innerHTML = (data.value || []).map(p => `
+  await renderConnectorBrowse(
+    'connector-browse-azure_devops',
+    '/connectors/azure-devops/projects',
+    data => (data.value || []).map(p => `
       <div class="connector-item-row is-folder" onclick="browseAzureDevOpsRepos('${escAttr(p.name)}')">
         <span class="ci-name">📁 ${escHtml(p.name)}</span>
-      </div>`).join('') || '<div class="connector-browse-note">No projects</div>';
-  } catch (e) {
-    el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
-  }
+      </div>`).join('') || '<div class="connector-browse-note">No projects</div>',
+  );
 }
 
 async function browseAzureDevOpsRepos(project) {
-  const el = document.getElementById('connector-browse-azure_devops');
-  el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
-  try {
-    const res = await fetch(`/connectors/azure-devops/projects/${encodeURIComponent(project)}/repos`, { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
-
-    const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseAzureDevOpsProjects()">Projects</a> / ${escHtml(project)}</div>`;
-    const rows = (data.value || []).map(r => `
-      <div class="connector-item-row is-folder" onclick="browseAzureDevOpsItems('${escAttr(project)}', '${escAttr(r.id)}', '${escAttr(r.name)}', '/')">
-        <span class="ci-name">📁 ${escHtml(r.name)}</span>
-      </div>`).join('') || '<div class="connector-browse-note">No repositories in this project</div>';
-
-    el.innerHTML = crumbs + rows;
-  } catch (e) {
-    el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
-  }
+  await renderConnectorBrowse(
+    'connector-browse-azure_devops',
+    `/connectors/azure-devops/projects/${encodeURIComponent(project)}/repos`,
+    data => {
+      const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseAzureDevOpsProjects()">Projects</a> / ${escHtml(project)}</div>`;
+      const rows = (data.value || []).map(r => `
+        <div class="connector-item-row is-folder" onclick="browseAzureDevOpsItems('${escAttr(project)}', '${escAttr(r.id)}', '${escAttr(r.name)}', '/')">
+          <span class="ci-name">📁 ${escHtml(r.name)}</span>
+        </div>`).join('') || '<div class="connector-browse-note">No repositories in this project</div>';
+      return crumbs + rows;
+    },
+  );
 }
 
 async function browseAzureDevOpsItems(project, repoId, repoName, path) {
-  const el = document.getElementById('connector-browse-azure_devops');
-  el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
-  try {
-    const params = new URLSearchParams({ path, recursion_level: 'OneLevel' });
-    const res = await fetch(
-      `/connectors/azure-devops/projects/${encodeURIComponent(project)}/repos/${encodeURIComponent(repoId)}/items?${params}`,
-      { headers: connectorHeaders() },
-    );
-    if (handleAuthError(res)) return;
-    const data = await safeJson(res);
-    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
+  const params = new URLSearchParams({ path, recursion_level: 'OneLevel' });
+  await renderConnectorBrowse(
+    'connector-browse-azure_devops',
+    `/connectors/azure-devops/projects/${encodeURIComponent(project)}/repos/${encodeURIComponent(repoId)}/items?${params}`,
+    data => {
+      const crumbs = [
+        `<a class="crumb" onclick="browseAzureDevOpsProjects()">Projects</a>`,
+        `<a class="crumb" onclick="browseAzureDevOpsRepos('${escAttr(project)}')">${escHtml(project)}</a>`,
+        `<a class="crumb" onclick="browseAzureDevOpsItems('${escAttr(project)}', '${escAttr(repoId)}', '${escAttr(repoName)}', '/')">${escHtml(repoName)}</a>`,
+      ];
+      let acc = '';
+      path.split('/').filter(Boolean).forEach(p => {
+        acc = acc ? `${acc}/${p}` : `/${p}`;
+        crumbs.push(`<a class="crumb" onclick="browseAzureDevOpsItems('${escAttr(project)}', '${escAttr(repoId)}', '${escAttr(repoName)}', '${escAttr(acc)}')">${escHtml(p)}</a>`);
+      });
 
-    const crumbs = [
-      `<a class="crumb" onclick="browseAzureDevOpsProjects()">Projects</a>`,
-      `<a class="crumb" onclick="browseAzureDevOpsRepos('${escAttr(project)}')">${escHtml(project)}</a>`,
-      `<a class="crumb" onclick="browseAzureDevOpsItems('${escAttr(project)}', '${escAttr(repoId)}', '${escAttr(repoName)}', '/')">${escHtml(repoName)}</a>`,
-    ];
-    let acc = '';
-    path.split('/').filter(Boolean).forEach(p => {
-      acc = acc ? `${acc}/${p}` : `/${p}`;
-      crumbs.push(`<a class="crumb" onclick="browseAzureDevOpsItems('${escAttr(project)}', '${escAttr(repoId)}', '${escAttr(repoName)}', '${escAttr(acc)}')">${escHtml(p)}</a>`);
-    });
+      // OneLevel + scopePath returns the folder itself alongside its children - drop the self-entry.
+      const items = (data.value || []).filter(it => it.path !== path);
+      const rows = items.map(it => it.isFolder
+        ? `<div class="connector-item-row is-folder" onclick="browseAzureDevOpsItems('${escAttr(project)}', '${escAttr(repoId)}', '${escAttr(repoName)}', '${escAttr(it.path)}')">
+             <span class="ci-name">📁 ${escHtml(it.path.split('/').pop())}</span>
+           </div>`
+        : `<div class="connector-item-row" onclick="ingestAzureDevOpsFile('${escAttr(project)}', '${escAttr(repoId)}', '${escAttr(it.path)}')">
+             <span class="ci-name">📄 ${escHtml(it.path.split('/').pop())}</span>
+           </div>`
+      ).join('') || '<div class="connector-browse-note">Empty folder</div>';
 
-    // OneLevel + scopePath returns the folder itself alongside its children - drop the self-entry.
-    const items = (data.value || []).filter(it => it.path !== path);
-    const rows = items.map(it => it.isFolder
-      ? `<div class="connector-item-row is-folder" onclick="browseAzureDevOpsItems('${escAttr(project)}', '${escAttr(repoId)}', '${escAttr(repoName)}', '${escAttr(it.path)}')">
-           <span class="ci-name">📁 ${escHtml(it.path.split('/').pop())}</span>
-         </div>`
-      : `<div class="connector-item-row" onclick="ingestAzureDevOpsFile('${escAttr(project)}', '${escAttr(repoId)}', '${escAttr(it.path)}')">
-           <span class="ci-name">📄 ${escHtml(it.path.split('/').pop())}</span>
-         </div>`
-    ).join('') || '<div class="connector-browse-note">Empty folder</div>';
-
-    el.innerHTML = `<div class="connector-breadcrumb">${crumbs.join(' / ')}</div>` + rows;
-  } catch (e) {
-    el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
-  }
+      return `<div class="connector-breadcrumb">${crumbs.join(' / ')}</div>` + rows;
+    },
+  );
 }
 
 async function ingestAzureDevOpsFile(project, repoId, path) {
@@ -1741,8 +1788,8 @@ function resetSession() {
   const messages = document.getElementById('messages');
   messages.innerHTML = `
     <div class="welcome">
-      <div class="welcome-icon">
-        <svg width="40" height="40" viewBox="0 0 24 24" fill="none"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke="url(#g3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><defs><linearGradient id="g3" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse"><stop stop-color="#667eea"/><stop offset="1" stop-color="#764ba2"/></linearGradient></defs></svg>
+      <div class="aria-welcome-avatar">
+        <img src="/dabur-logo.svg" alt="Dabur" class="brand-logo-img" />
       </div>
       <h2 class="welcome-title">Hi, I'm ARIA ✦</h2>
       <p class="welcome-greeting">Upload your data and I'll answer anything about it.</p>
