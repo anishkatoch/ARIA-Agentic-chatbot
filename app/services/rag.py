@@ -132,16 +132,22 @@ def _is_retryable_model_error(e: Exception) -> bool:
     )
 
 
-def _openai_llm():
+def _openai_llm(temperature: float = 0.2):
     from langchain_openai import ChatOpenAI
     return ChatOpenAI(
         model=cfg.openai_llm_model,
         openai_api_key=cfg.openai_api_key,
-        temperature=0.2,
+        temperature=temperature,
     )
 
 
+def _openai_available() -> bool:
+    return bool(cfg.openai_fallback_enabled and cfg.openai_api_key)
+
+
 def get_llm():
+    if cfg.llm_provider == "openai" and _openai_available():
+        return _openai_llm()
     return ChatGroq(
         model=cfg.groq_model,
         groq_api_key=cfg.groq_api_key,
@@ -165,8 +171,20 @@ def _all_groq_models() -> list[str]:
 
 
 def llm_invoke(messages: list) -> object:
-    """Try each Groq model in order, then OpenAI if all are rate-limited and fallback enabled."""
+    """Try the primary provider (cfg.llm_provider) first, the other as fallback."""
     last_exc = None
+    openai_first = cfg.llm_provider == "openai" and _openai_available()
+
+    if openai_first:
+        try:
+            return _openai_llm().invoke(messages)
+        except Exception as e:
+            if _is_retryable_model_error(e):
+                logger.warning(f"[LLM] OpenAI {cfg.openai_llm_model} unavailable ({e}), falling back to Groq")
+                last_exc = e
+            else:
+                raise
+
     for model in _all_groq_models():
         try:
             result = _groq_llm(model).invoke(messages)
@@ -179,15 +197,29 @@ def llm_invoke(messages: list) -> object:
                 last_exc = e
             else:
                 raise
-    if cfg.openai_fallback_enabled and cfg.openai_api_key:
+
+    if not openai_first and _openai_available():
         logger.warning(f"[LLM] All Groq models exhausted - falling back to OpenAI {cfg.openai_llm_model}")
         return _openai_llm().invoke(messages)
     raise last_exc
 
 
 def chain_invoke(prompt, input_dict: dict) -> str:
-    """Try each Groq model in order, then OpenAI if all are rate-limited and fallback enabled."""
+    """Try the primary provider (cfg.llm_provider) first, the other as fallback."""
     last_exc = None
+    openai_first = cfg.llm_provider == "openai" and _openai_available()
+
+    if openai_first:
+        try:
+            chain = prompt | _openai_llm() | StrOutputParser()
+            return chain.invoke(input_dict)
+        except Exception as e:
+            if _is_retryable_model_error(e):
+                logger.warning(f"[LLM] OpenAI {cfg.openai_llm_model} unavailable ({e}), falling back to Groq")
+                last_exc = e
+            else:
+                raise
+
     for model in _all_groq_models():
         try:
             chain = prompt | _groq_llm(model) | StrOutputParser()
@@ -201,7 +233,8 @@ def chain_invoke(prompt, input_dict: dict) -> str:
                 last_exc = e
             else:
                 raise
-    if cfg.openai_fallback_enabled and cfg.openai_api_key:
+
+    if not openai_first and _openai_available():
         logger.warning(f"[LLM] All Groq models exhausted - falling back to OpenAI {cfg.openai_llm_model}")
         chain = prompt | _openai_llm() | StrOutputParser()
         return chain.invoke(input_dict)
@@ -405,12 +438,15 @@ def _hybrid_retrieve(vectorstore, session_id: str, queries: list[str]) -> list:
 
 def check_intent(question: str, history: list[dict] | None = None) -> bool:
     try:
-        _intent_llm = ChatGroq(
-            model=cfg.groq_intent_model,
-            groq_api_key=cfg.groq_api_key,
-            temperature=0.0,
-            max_retries=0,
-        )
+        if cfg.llm_provider == "openai" and _openai_available():
+            _intent_llm = _openai_llm(temperature=0.0)
+        else:
+            _intent_llm = ChatGroq(
+                model=cfg.groq_intent_model,
+                groq_api_key=cfg.groq_api_key,
+                temperature=0.0,
+                max_retries=0,
+            )
         history_block = ""
         if history:
             history_block = f"Recent conversation:\n{_history_to_str(history)}\n\n"
@@ -732,15 +768,21 @@ def _react_tools(vectorstore, session_id: str, use_graph: bool, clarify_allowed:
 
 
 def _react_llm_with_fallbacks(tools: list):
-    """Same Groq fallback chain as llm_invoke, but using Runnable.with_fallbacks()
-    so a model that errors (rate limit, decommissioned, or spontaneously emitting
-    a native tool call the API rejects) is retried with the next model natively,
-    all while real tool-calling stays bound throughout the chain."""
-    models = _all_groq_models()
-    primary, *rest = [_groq_llm(m).bind_tools(tools) for m in models]
-    fallbacks = list(rest)
-    if cfg.openai_fallback_enabled and cfg.openai_api_key:
-        fallbacks.append(_openai_llm().bind_tools(tools))
+    """Same provider-ordered fallback chain as llm_invoke, but using
+    Runnable.with_fallbacks() so a model that errors (rate limit, decommissioned,
+    or spontaneously emitting a native tool call the API rejects) is retried with
+    the next model natively, all while real tool-calling stays bound throughout
+    the chain."""
+    groq_chain = [_groq_llm(m).bind_tools(tools) for m in _all_groq_models()]
+
+    if cfg.llm_provider == "openai" and _openai_available():
+        primary = _openai_llm().bind_tools(tools)
+        fallbacks = groq_chain
+    else:
+        primary, *fallbacks = groq_chain
+        if _openai_available():
+            fallbacks.append(_openai_llm().bind_tools(tools))
+
     return primary.with_fallbacks(fallbacks) if fallbacks else primary
 
 

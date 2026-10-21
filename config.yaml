@@ -2,7 +2,7 @@ app:
   port: 8001
 
 llm:
-  provider: groq                          # groq | openai
+  provider: openai                        # groq | openai
   groq_model: openai/gpt-oss-20b         # primary model - fast (confirmed available on this account)
   intent_model: openai/gpt-oss-20b       # fast model for YES/NO intent check - keeps latency low
   groq_fallback_models:                  # tried in order when primary fails
