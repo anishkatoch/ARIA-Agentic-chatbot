@@ -32,6 +32,7 @@ _SAMPLE_FILE = os.path.join(os.path.dirname(__file__), "data", "sample-ai-overvi
 _PUBLIC_PREFIXES = (
     "/auth", "/health", "/auth.html", "/auth.css", "/auth.js",
     "/gmail/callback", "/google-drive/callback", "/salesforce/callback",
+    "/privacy", "/terms",
 )
 _PROTECTED_PREFIXES = ("/chat/", "/upload/", "/connectors/")
 
@@ -186,7 +187,17 @@ async def auth_middleware(request: Request, call_next):
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
         request.state.user = user
 
-    return await call_next(request)
+    response = await call_next(request)
+
+    # Static assets (JS/CSS/HTML) change during active development - force the
+    # browser to always revalidate with the server (a cheap 304 via ETag/
+    # Last-Modified when unchanged) instead of silently serving a stale cached
+    # copy with no request at all, which otherwise means a shipped frontend
+    # fix doesn't reach an already-open tab until a hard refresh.
+    if path == "/" or path.endswith((".js", ".css", ".html")):
+        response.headers["Cache-Control"] = "no-cache"
+
+    return response
 
 
 # ── Routers ────────────────────────────────────────────────────────────────────
@@ -213,6 +224,19 @@ def health():
 @app.get("/auth.html")
 def serve_auth():
     return FileResponse(os.path.join(_STATIC_DIR, "auth.html"))
+
+
+# Public Privacy Policy / Terms of Service pages - also what Google/Microsoft's
+# OAuth consent screen setup asks for as "Privacy Policy URL" / "Terms of
+# Service URL" when configuring Sign in with Google/Microsoft.
+@app.get("/privacy")
+def serve_privacy():
+    return FileResponse(os.path.join(_STATIC_DIR, "privacy.html"))
+
+
+@app.get("/terms")
+def serve_terms():
+    return FileResponse(os.path.join(_STATIC_DIR, "terms.html"))
 
 
 app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="static")

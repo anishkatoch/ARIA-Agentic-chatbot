@@ -7,6 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/auth.css" />
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 </head>
 <body>
 
@@ -23,10 +24,7 @@
     <!-- Brand -->
     <div class="al-brand">
       <div class="al-logo">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-          <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"
-            stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
+        <img src="/dabur-logo.svg" alt="Dabur" class="brand-logo-img" />
       </div>
       <span class="al-logo-name">ARIA</span>
     </div>
@@ -176,6 +174,19 @@
             <span class="btn-spinner hidden"></span>
           </button>
         </form>
+
+        <div class="oauth-divider hidden" id="oauth-divider"><span>or continue with</span></div>
+        <div class="oauth-buttons hidden" id="oauth-buttons">
+          <button type="button" class="oauth-btn" id="btn-oauth-google" onclick="handleOAuthSignin('google')">
+            <svg width="16" height="16" viewBox="0 0 24 24"><path fill="#4285F4" d="M23.52 12.27c0-.85-.07-1.47-.22-2.12H12v3.85h6.56c-.13 1.09-.84 2.73-2.42 3.84l-.02.15 3.52 2.73.24.02c2.24-2.07 3.53-5.12 3.53-8.47z"/><path fill="#34A853" d="M12 24c3.24 0 5.95-1.07 7.94-2.91l-3.78-2.93c-1.01.71-2.37 1.2-4.16 1.2-3.18 0-5.88-2.1-6.84-5.01l-.14.01-3.68 2.85-.05.14C3.26 21.3 7.3 24 12 24z"/><path fill="#FBBC05" d="M5.16 14.35A7.2 7.2 0 0 1 4.77 12c0-.82.14-1.61.38-2.35l-.01-.15-3.72-2.89-.12.06A11.98 11.98 0 0 0 0 12c0 1.93.46 3.76 1.3 5.33l3.86-3z"/><path fill="#EA4335" d="M12 4.75c2.26 0 3.78.97 4.65 1.79l3.39-3.31C17.94 1.19 15.24 0 12 0 7.3 0 3.26 2.7 1.3 6.67l3.85 3C6.12 6.85 8.82 4.75 12 4.75z"/></svg>
+            Sign in with Google
+          </button>
+          <button type="button" class="oauth-btn" id="btn-oauth-microsoft" onclick="handleOAuthSignin('azure')">
+            <svg width="16" height="16" viewBox="0 0 24 24"><rect x="1" y="1" width="10" height="10" fill="#F25022"/><rect x="13" y="1" width="10" height="10" fill="#7FBA00"/><rect x="1" y="13" width="10" height="10" fill="#00A4EF"/><rect x="13" y="13" width="10" height="10" fill="#FFB900"/></svg>
+            Sign in with Microsoft
+          </button>
+        </div>
+        <div id="oauth-error" class="form-error hidden"></div>
       </div>
 
       <!-- ── Sign Up ── -->
@@ -312,6 +323,12 @@
       <div class="security-note">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
         We never store your password - secured by Supabase Auth
+      </div>
+
+      <div class="legal-links">
+        <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>
+        <span>&middot;</span>
+        <a href="/terms" target="_blank" rel="noopener">Terms of Service</a>
       </div>
 
     </div><!-- /auth-card -->

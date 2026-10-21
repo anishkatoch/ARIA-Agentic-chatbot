@@ -4,6 +4,61 @@
   if (localStorage.getItem('aria_dark_mode') === 'true') document.documentElement.classList.add('dark');
 })();
 
+/* ── Google / Microsoft sign-in (via Supabase) ────────────────
+   This app never implements the OAuth handshake itself - Supabase's own
+   JS client drives the whole redirect-to-provider-and-back flow (same
+   provider accounts Supabase already issues sessions for via password/OTP
+   login, so the backend's existing token verification needs no changes).
+   Requires Google/Azure enabled as providers in the Supabase dashboard -
+   see app/connectors/README.md's sibling note in README.md for the
+   external setup this depends on. */
+let _sb = null;
+
+async function initOAuth() {
+  try {
+    const res = await fetch('/auth/oauth-config');
+    const cfg = await res.json();
+    if (!cfg.supabase_url || !cfg.supabase_anon_key) return; // Supabase not configured - leave buttons hidden
+
+    _sb = supabase.createClient(cfg.supabase_url, cfg.supabase_anon_key);
+    document.getElementById('oauth-divider').classList.remove('hidden');
+    document.getElementById('oauth-buttons').classList.remove('hidden');
+
+    // Supabase's client auto-parses the access token out of the URL
+    // fragment when this page is the OAuth redirect target, so a session
+    // being present here means either that just happened, or the browser
+    // already had a valid Supabase session from an earlier OAuth sign-in.
+    const { data: { session } } = await _sb.auth.getSession();
+    if (session) {
+      const u = session.user;
+      const name = (u.user_metadata && (u.user_metadata.full_name || u.user_metadata.name)) || u.email.split('@')[0];
+      saveAuthAndRedirect({
+        token: session.access_token,
+        user: { id: u.id, email: u.email, name, role: 'user' },
+      });
+    }
+  } catch (e) {
+    console.warn('OAuth init failed:', e.message);
+  }
+}
+initOAuth();
+
+async function handleOAuthSignin(provider) {
+  const errEl = document.getElementById('oauth-error');
+  errEl.classList.add('hidden');
+  if (!_sb) return;
+  const { error } = await _sb.auth.signInWithOAuth({
+    provider,
+    options: { redirectTo: window.location.origin + '/auth.html' },
+  });
+  if (error) {
+    errEl.textContent = error.message;
+    errEl.classList.remove('hidden');
+  }
+  // On success the browser navigates away to the provider's consent screen -
+  // nothing else to do here until it redirects back and initOAuth() runs again.
+}
+
 /* ── OTP state ───────────────────────────────────────────────── */
 let _otpEmail     = '';
 let _resendTimer  = null;
@@ -74,8 +129,10 @@ function checkPasswordStrength(val) {
     { pct: '20%', color: '#ef4444', text: 'Very weak' },
     { pct: '40%', color: '#f97316', text: 'Weak' },
     { pct: '60%', color: '#eab308', text: 'Fair' },
-    { pct: '80%', color: '#22c55e', text: 'Strong' },
-    { pct: '100%', color: '#10b981', text: 'Very strong' },
+    // Teal, not plain green, so these top two levels stay visually
+    // distinct from the page's brand-green buttons/links.
+    { pct: '80%', color: '#14b8a6', text: 'Strong' },
+    { pct: '100%', color: '#2dd4bf', text: 'Very strong' },
   ];
   const l = levels[score - 1] || levels[0];
   fill.style.width = l.pct;

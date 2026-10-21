@@ -2,6 +2,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, EmailStr
 
+from app.config import cfg
 from app.services import auth_service
 
 logger = logging.getLogger(__name__)
@@ -116,6 +117,23 @@ async def forgot_password(req: ForgotPasswordRequest):
         logger.error(f"[AUTH] Forgot password error: {e}")
         # Always return success to avoid email enumeration
         return {"message": "Password reset email sent. Check your inbox."}
+
+
+@router.get("/oauth-config")
+async def oauth_config():
+    """Public config the frontend needs to drive Supabase's own OAuth redirect
+    flow for 'Continue with Google' / 'Continue with Microsoft' (client-side,
+    via the Supabase JS SDK - this app never handles the OAuth handshake
+    itself, same as how Supabase already handles email/password and OTP).
+
+    The anon key is Supabase's publishable key - safe to expose to the
+    browser by design (it's rate-limited and gated by RLS, not a secret).
+    Returns nulls if Supabase isn't configured, so the frontend can hide the
+    social-login buttons instead of showing something that will just fail.
+    """
+    if not cfg.supabase_url or not cfg.supabase_anon_key:
+        return {"supabase_url": None, "supabase_anon_key": None}
+    return {"supabase_url": cfg.supabase_url, "supabase_anon_key": cfg.supabase_anon_key}
 
 
 @router.get("/me")
