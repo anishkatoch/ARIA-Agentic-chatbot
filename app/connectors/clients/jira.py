@@ -12,10 +12,10 @@ from fastapi import HTTPException
 class JiraConnector:
     """Read-only Jira Cloud connector using REST API v3 and Basic Authentication."""
 
-    def __init__(self):
-        self.base_url = (os.getenv("JIRA_BASE_URL") or "").strip().rstrip("/")
-        self.email = (os.getenv("JIRA_EMAIL") or "").strip()
-        self.api_token = (os.getenv("JIRA_API_TOKEN") or "").strip()
+    def __init__(self, base_url: str | None = None, email: str | None = None, api_token: str | None = None):
+        self.base_url = (base_url or os.getenv("JIRA_BASE_URL") or "").strip().rstrip("/")
+        self.email = (email or os.getenv("JIRA_EMAIL") or "").strip()
+        self.api_token = (api_token or os.getenv("JIRA_API_TOKEN") or "").strip()
 
         if self.base_url and not (self.base_url.startswith("http://") or self.base_url.startswith("https://")):
             self.base_url = f"https://{self.base_url}"
@@ -426,6 +426,15 @@ class JiraConnector:
         }
 
 
-def get_jira_connector() -> JiraConnector:
-    """Factory function returning a JiraConnector instance."""
-    return JiraConnector()
+def get_jira_connector(user_id: str | None = None) -> JiraConnector:
+    """Uses this user's own credentials (from connector_credentials) if
+    they've set them, otherwise falls back to the shared JIRA_* env vars."""
+    creds = {}
+    if user_id:
+        from app.connectors import credential_store
+        creds = credential_store.get_credentials(user_id, "jira") or {}
+    return JiraConnector(
+        base_url=creds.get("base_url"),
+        email=creds.get("email"),
+        api_token=creds.get("api_token"),
+    )

@@ -14,9 +14,9 @@ class AzureDevOpsConnector:
 
     API_VERSION = "7.1"
 
-    def __init__(self) -> None:
-        org_url = os.getenv("AZURE_DEVOPS_ORG_URL", "").strip().rstrip("/")
-        self.pat = os.getenv("AZURE_DEVOPS_PAT", "").strip()
+    def __init__(self, org_url: str | None = None, pat: str | None = None) -> None:
+        org_url = (org_url or os.getenv("AZURE_DEVOPS_ORG_URL", "")).strip().rstrip("/")
+        self.pat = (pat or os.getenv("AZURE_DEVOPS_PAT", "")).strip()
 
         if not org_url:
             raise AzureDevOpsError(
@@ -135,3 +135,13 @@ class AzureDevOpsConnector:
             params=params,
         )
         return resp.content
+
+
+def get_azure_devops_connector(user_id: str | None = None) -> AzureDevOpsConnector:
+    """Uses this user's own org_url/PAT (from connector_credentials) if
+    they've set them, otherwise falls back to the shared AZURE_DEVOPS_* env vars."""
+    creds = {}
+    if user_id:
+        from app.connectors import credential_store
+        creds = credential_store.get_credentials(user_id, "azure_devops") or {}
+    return AzureDevOpsConnector(org_url=creds.get("org_url"), pat=creds.get("pat"))

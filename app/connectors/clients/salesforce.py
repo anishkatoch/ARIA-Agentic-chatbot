@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
 
 from app.connectors import token_store
+from app.connectors.clients.oauth2_token_client import OAuth2TokenClient
 
 AUTH_ENDPOINT = "https://login.salesforce.com/services/oauth2/authorize"
 TOKEN_ENDPOINT = "https://login.salesforce.com/services/oauth2/token"
@@ -58,6 +59,9 @@ class SalesforceConnector:
                 detail="SALESFORCE_CLIENT_ID or SALESFORCE_CLIENT_SECRET not configured in .env",
             )
 
+        self._oauth = OAuth2TokenClient(user_id, PROVIDER, self.client_id, self.client_secret,
+                                          TOKEN_ENDPOINT, default_expires_in=7200)
+
     def get_authorization_url(self) -> str:
         verifier, challenge = _new_pkce_pair()
         _pkce_store[self.user_id] = verifier
@@ -67,7 +71,7 @@ class SalesforceConnector:
             "client_id": self.client_id,
             "redirect_uri": self.redirect_uri,
             "state": self.user_id,
-            "prompt": "consent",
+            "prompt": "login consent",
             "code_challenge": challenge,
             "code_challenge_method": "S256",
         }
@@ -84,50 +88,28 @@ class SalesforceConnector:
         code_verifier = _pkce_store.pop(self.user_id, None)
         if code_verifier:
             form["code_verifier"] = code_verifier
-        data = urllib.parse.urlencode(form).encode("utf-8")
-
-        req = urllib.request.Request(
-            TOKEN_ENDPOINT,
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
 
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                token_data = json.loads(resp.read().decode("utf-8"))
+            token_data = self._oauth.post_token_endpoint(form)
         except urllib.error.HTTPError as exc:
             err_body = exc.read().decode("utf-8", errors="replace")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Salesforce token exchange failed: {err_body}",
-            )
+            raise HTTPException(status_code=400, detail=f"Salesforce token exchange failed: {err_body}")
         except Exception as e:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Failed to reach Salesforce OAuth: {str(e)}",
-            )
+            raise HTTPException(status_code=502, detail=f"Failed to reach Salesforce OAuth: {str(e)}")
 
-        expires_in = token_data.get("expires_in", 7200)
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=float(expires_in))
-
-        existing = token_store.get_token(self.user_id, PROVIDER)
+        expires_at = self._oauth.expires_at_from(token_data)
+        existing = self._oauth.stored_token()
         refresh_token = token_data.get("refresh_token") or (existing or {}).get("refresh_token")
-
         instance_url = token_data.get("instance_url") or self.instance_url or (existing or {}).get("extra", {}).get("instance_url")
 
-        token_store.save_token(
-            self.user_id, PROVIDER,
-            access_token=token_data["access_token"],
-            refresh_token=refresh_token,
-            expires_at=expires_at,
+        self._oauth.save(
+            token_data["access_token"], refresh_token, expires_at,
             extra={"instance_url": instance_url} if instance_url else None,
         )
-
         return token_data
 
     def _get_valid_token(self) -> str:
-        row = token_store.get_token(self.user_id, PROVIDER)
+        row = self._oauth.stored_token()
         if row is None:
             raise HTTPException(
                 status_code=401,
@@ -135,7 +117,6 @@ class SalesforceConnector:
             )
 
         access_token = row["access_token"]
-        expires_at = row["expires_at"]
         refresh_token = row["refresh_token"]
 
         if not access_token:
@@ -144,7 +125,7 @@ class SalesforceConnector:
                 detail="Salesforce access token missing. Please re-authenticate via /connectors/salesforce/auth/login",
             )
 
-        if expires_at is None or datetime.now(timezone.utc) > (expires_at - timedelta(seconds=60)):
+        if self._oauth.is_expiring(row["expires_at"]):
             if not refresh_token:
                 return access_token
             access_token = self._refresh_access_token(refresh_token)
@@ -152,41 +133,27 @@ class SalesforceConnector:
         return access_token
 
     def _refresh_access_token(self, refresh_token: str) -> str:
-        data = urllib.parse.urlencode({
+        form = {
             "grant_type": "refresh_token",
             "client_id": self.client_id,
             "client_secret": self.client_secret,
             "refresh_token": refresh_token,
-        }).encode("utf-8")
-
-        req = urllib.request.Request(
-            TOKEN_ENDPOINT,
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
-
+        }
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                new_data = json.loads(resp.read().decode("utf-8"))
+            new_data = self._oauth.post_token_endpoint(form)
         except Exception as exc:
             raise HTTPException(
                 status_code=401,
                 detail=f"Failed to refresh Salesforce token: {str(exc)}. Please re-authenticate.",
             )
 
-        existing = token_store.get_token(self.user_id, PROVIDER) or {}
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=float(new_data.get("expires_in", 7200)))
+        existing = self._oauth.stored_token() or {}
         instance_url = new_data.get("instance_url") or existing.get("extra", {}).get("instance_url")
 
-        token_store.save_token(
-            self.user_id, PROVIDER,
-            access_token=new_data["access_token"],
-            refresh_token=refresh_token,
-            expires_at=expires_at,
+        self._oauth.save(
+            new_data["access_token"], refresh_token, self._oauth.expires_at_from(new_data),
             extra={"instance_url": instance_url} if instance_url else None,
         )
-
         return new_data["access_token"]
 
     def _get_instance_url(self) -> str:

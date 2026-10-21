@@ -48,3 +48,30 @@ class ConnectorToken(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "provider", name="uq_user_provider"),
     )
+
+
+class ConnectorCredential(Base):
+    """Per-user override of an API-key-style connector's credentials (GitHub
+    PAT, Jira base_url+email+token, ServiceNow instance+username+password,
+    Azure DevOps org_url+PAT). These 4 connectors otherwise fall back to a
+    single shared app-level env var - a row here lets one user "bring their
+    own key" that takes priority for their own requests only, without
+    affecting any other user or requiring an env var / server restart.
+
+    Distinct from ConnectorToken (OAuth access/refresh tokens for Gmail/
+    Google Drive/Salesforce, which are obtained via a login redirect, not
+    typed in by hand) - `credentials` is a single JSON blob since each of
+    these 4 providers' credential shape is different."""
+    __tablename__ = "connector_credentials"
+
+    id          = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id     = Column(String, nullable=False, index=True)
+    provider    = Column(String, nullable=False)  # "github" | "jira" | "servicenow" | "azure_devops"
+    credentials = Column(Text, nullable=False)     # JSON-encoded, shape varies by provider
+    created_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                          onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", name="uq_cred_user_provider"),
+    )

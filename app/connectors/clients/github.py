@@ -15,7 +15,10 @@ MAX_FILE_SIZE = 1_000_000
 
 
 class GitHubConnector:
-    """Read-only GitHub connector authenticated via a plain GITHUB_TOKEN env var.
+    """Read-only GitHub connector authenticated via a personal access token -
+    either this user's own (stored in connector_credentials, see
+    get_github_connector below) or the shared GITHUB_TOKEN env var as a
+    fallback when they haven't set one.
 
     NOTE: CONNECTOR_POC's original implementation shelled out to
     `gh auth token` (the GitHub CLI) - that depends on the `gh` binary being
@@ -24,8 +27,11 @@ class GitHubConnector:
     GITHUB_TOKEN instead (a personal access token with repo read scope).
     """
 
+    def __init__(self, token: str | None = None):
+        self._token_override = (token or "").strip() or None
+
     def _get_token(self) -> str:
-        token = os.getenv("GITHUB_TOKEN", "").strip()
+        token = self._token_override or os.getenv("GITHUB_TOKEN", "").strip()
         if not token:
             raise HTTPException(
                 status_code=500,
@@ -204,5 +210,13 @@ class GitHubConnector:
         return content, result["name"]
 
 
-def get_github_connector() -> GitHubConnector:
-    return GitHubConnector()
+def get_github_connector(user_id: str | None = None) -> GitHubConnector:
+    """Uses this user's own token (from connector_credentials) if they've set
+    one, otherwise falls back to the shared GITHUB_TOKEN env var."""
+    token = None
+    if user_id:
+        from app.connectors import credential_store
+        creds = credential_store.get_credentials(user_id, "github")
+        if creds:
+            token = creds.get("token")
+    return GitHubConnector(token=token)

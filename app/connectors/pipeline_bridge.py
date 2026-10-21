@@ -41,6 +41,7 @@ response contract is unchanged.
 """
 import logging
 import os
+import re
 import uuid
 
 from fastapi import HTTPException
@@ -208,3 +209,47 @@ async def ingest_bytes(provider: str, content: bytes, filename: str, user_id: st
         "session_id": session_id, "filename": filename, "chunks": file_chunks,
         "source": provider,
     }
+
+
+async def ingest_gmail_message(message_id: str, user_id: str, client_token: str,
+                                session_id: str | None = None) -> dict:
+    """Ingests a whole Gmail email - its own body text plus the extracted
+    text of every attachment it has - as one combined document, instead of
+    requiring the caller to pick a single attachment to add. Each attachment
+    goes through the same parse_file() every other document type does (so a
+    PDF/DOCX/XLSX/CSV attachment's actual content is included, not just its
+    filename); an attachment that fails to parse is noted and skipped rather
+    than failing the whole email."""
+    from app.connectors.clients.gmail import get_gmail_connector
+
+    connector = get_gmail_connector(user_id)
+    message = connector.get_message(message_id)
+
+    parts = [
+        f"Subject: {message.get('subject', '')}",
+        f"From: {message.get('from', '')}",
+        f"To: {message.get('to', '')}",
+        f"Date: {message.get('date', '')}",
+        "",
+        message.get("body_text", ""),
+    ]
+
+    for att in message.get("attachments", []):
+        att_filename = att.get("filename") or "attachment"
+        try:
+            att_content, _ = connector.download_attachment(message_id, att["attachment_id"], att_filename)
+            att_text, _ = await parse_file(att_content, att_filename)
+            parts.append(f"\n--- Attachment: {att_filename} ---\n{att_text}")
+        except Exception as e:
+            logger.warning(f"[CONNECTORS][GMAIL] Could not extract text from attachment {att_filename}: {e}")
+            parts.append(f"\n--- Attachment: {att_filename} (could not extract text: {e}) ---")
+
+    combined_text = "\n".join(parts)
+
+    safe_subject = re.sub(r"[^A-Za-z0-9 ._-]+", "", message.get("subject", "") or "").strip()[:60] or "email"
+    filename = f"{safe_subject} ({message_id[:8]}).txt"
+
+    return await ingest_bytes(
+        provider="gmail", content=combined_text.encode("utf-8"), filename=filename,
+        user_id=user_id, client_token=client_token, session_id=session_id,
+    )

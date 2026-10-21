@@ -34,6 +34,24 @@ def _get_db_session():
         return None
 
 
+def get_connected_providers(user_id: str) -> set:
+    """Returns the set of providers this user has a token for - one query for
+    all of them, instead of /status calling get_token() once per oauth
+    provider (each a separate DB session open/close)."""
+    db = _get_db_session()
+    if db is None:
+        return set()
+    try:
+        from app.connectors.models import ConnectorToken
+        rows = db.query(ConnectorToken.provider).filter(ConnectorToken.user_id == user_id).all()
+        return {r[0] for r in rows}
+    except Exception as e:
+        logger.warning(f"[CONNECTOR_TOKENS] get_connected_providers failed for user={user_id}: {e}")
+        return set()
+    finally:
+        db.close()
+
+
 def get_token(user_id: str, provider: str) -> Optional[dict]:
     """Returns {"access_token", "refresh_token", "expires_at" (datetime|None), "extra" (dict)} or None."""
     db = _get_db_session()

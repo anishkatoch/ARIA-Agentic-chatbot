@@ -39,9 +39,9 @@ from io import BytesIO
 from urllib.parse import quote
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 
-from app.connectors import access_gate, token_store
+from app.connectors import access_gate, token_store, credential_store
 from app.connectors.clients.file_share import get_connector as get_file_share_connector
 from app.connectors.clients.lms import get_lms_connector
 from app.connectors.clients.github import get_github_connector
@@ -53,10 +53,25 @@ from app.connectors.clients.jira import get_jira_connector
 from app.connectors.clients.microsoft_graph import MicrosoftGraphError
 from app.connectors.clients.sharepoint import SharePointConnector
 from app.connectors.clients.teams import TeamsConnector
-from app.connectors.clients.azure_devops import AzureDevOpsConnector, AzureDevOpsError
+from app.connectors.clients.azure_devops import get_azure_devops_connector, AzureDevOpsConnector, AzureDevOpsError
 from app.connectors import pipeline_bridge
 
 logger = logging.getLogger(__name__)
+
+
+def _content_disposition_header(filename: str) -> dict[str, str]:
+    """Builds a Content-Disposition header for a file download - shared by
+    every connector's download endpoint instead of each one reimplementing
+    its own filename handling (previously: three endpoints manually
+    stripped quote/CR/LF characters, one used only the RFC 5987 extended
+    form, and one sent no filename at all). Includes both a plain ASCII-safe
+    `filename=` fallback for older clients and the precise RFC 5987
+    `filename*=UTF-8''...` form every modern browser actually prefers, so a
+    real filename with non-ASCII or special characters is never mangled or
+    allowed to break the header."""
+    clean = filename.replace("\r", "").replace("\n", "")
+    ascii_fallback = clean.encode("ascii", "replace").decode("ascii").replace('"', "'") or "download"
+    return {"Content-Disposition": f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(clean, safe='')}"}
 
 
 def _user_id(request: Request) -> str:
@@ -64,6 +79,19 @@ def _user_id(request: Request) -> str:
     if not user or not user.get("id"):
         raise HTTPException(status_code=401, detail="Authentication required")
     return user["id"]
+
+
+def _normalize_provider(provider: str) -> str:
+    """Canonical provider id (matches CONNECTOR_CATALOG's "id" field, and
+    what every client module hardcodes as its provider string when reading/
+    writing token_store or credential_store) - e.g. "google_drive",
+    "azure_devops". Most of this router's URLs instead use CONNECTOR_CATALOG's
+    "path" field, which is hyphenated for some providers (e.g. "google-drive",
+    "azure-devops" - see /auth/login, /status's login_url, every browse
+    endpoint). /disconnect and /credentials act on token_store/credential_store
+    directly, so they need the canonical id - this converts whichever form
+    the caller sent."""
+    return provider.replace("-", "_")
 
 
 def require_connectors_unlock(
@@ -127,16 +155,42 @@ def unlock_connectors(request: Request, body: dict = Body(...)):
 CONNECTOR_CATALOG = [
     {"id": "file_share",   "path": "file-share",   "name": "File Share",        "type": "files",              "auth": "config"},
     {"id": "lms",          "path": "lms",           "name": "LMS",               "type": "learning",           "auth": "none"},
-    {"id": "github",       "path": "github",        "name": "GitHub",            "type": "code",               "auth": "config"},
+    {"id": "github",       "path": "github",        "name": "GitHub",            "type": "code",               "auth": "byok"},
     {"id": "gmail",        "path": "gmail",         "name": "Gmail",             "type": "email",              "auth": "oauth"},
     {"id": "google_drive", "path": "google-drive",  "name": "Google Drive",      "type": "documents",          "auth": "oauth"},
     {"id": "sharepoint",   "path": "sharepoint",    "name": "SharePoint",        "type": "documents",          "auth": "config"},
     {"id": "teams",        "path": "teams",         "name": "Microsoft Teams",   "type": "chat",               "auth": "config"},
-    {"id": "azure_devops", "path": "azure-devops",  "name": "Azure DevOps Repos","type": "code",               "auth": "config"},
-    {"id": "jira",         "path": "jira",          "name": "Jira",              "type": "project_management", "auth": "config"},
-    {"id": "servicenow",   "path": "servicenow",    "name": "ServiceNow",        "type": "itsm",               "auth": "config"},
+    {"id": "azure_devops", "path": "azure-devops",  "name": "Azure DevOps Repos","type": "code",               "auth": "byok"},
+    {"id": "jira",         "path": "jira",          "name": "Jira",              "type": "project_management", "auth": "byok"},
+    {"id": "servicenow",   "path": "servicenow",    "name": "ServiceNow",        "type": "itsm",               "auth": "byok"},
     {"id": "salesforce",   "path": "salesforce",    "name": "Salesforce",        "type": "crm",                "auth": "oauth"},
 ]
+
+# auth="byok" ("bring your own key") connectors: a user can enter their own
+# credentials here to override the shared app-level env var default for just
+# their own requests (see app.connectors.credential_store). Field shape is
+# per-provider since each one's credential form is different - exposed via
+# /status's credential_fields so the frontend builds the right form without
+# duplicating this list.
+BYOK_CREDENTIAL_FIELDS = {
+    "github": [
+        {"key": "token", "label": "Personal Access Token", "type": "password"},
+    ],
+    "jira": [
+        {"key": "base_url", "label": "Jira Base URL", "type": "text", "placeholder": "https://your-domain.atlassian.net"},
+        {"key": "email", "label": "Email", "type": "text"},
+        {"key": "api_token", "label": "API Token", "type": "password"},
+    ],
+    "servicenow": [
+        {"key": "instance_url", "label": "Instance URL", "type": "text", "placeholder": "https://your-instance.service-now.com"},
+        {"key": "username", "label": "Username", "type": "text"},
+        {"key": "password", "label": "Password", "type": "password"},
+    ],
+    "azure_devops": [
+        {"key": "org_url", "label": "Organization URL", "type": "text", "placeholder": "https://dev.azure.com/your-org"},
+        {"key": "pat", "label": "Personal Access Token", "type": "password"},
+    ],
+}
 
 
 def _is_placeholder(*values: str) -> bool:
@@ -184,24 +238,112 @@ def _is_configured(provider_id: str) -> bool:
     return False
 
 
+def _delete_token_and_credentials(user_id: str, provider: str) -> None:
+    """Deletes from both connector_tokens and connector_credentials in a
+    single DB session/commit, instead of calling token_store.delete_token()
+    and credential_store.delete_credentials() separately (each opens and
+    closes its own session - roughly doubles the Supabase round-trip cost of
+    one disconnect click)."""
+    try:
+        from app.db.session import get_session_factory
+        factory = get_session_factory()
+        if factory is None:
+            return
+        db = factory()
+    except Exception as e:
+        logger.warning(f"[CONNECTORS] disconnect DB session unavailable: {e}")
+        return
+    try:
+        from app.connectors.models import ConnectorToken, ConnectorCredential
+        db.query(ConnectorToken).filter(
+            ConnectorToken.user_id == user_id, ConnectorToken.provider == provider
+        ).delete()
+        db.query(ConnectorCredential).filter(
+            ConnectorCredential.user_id == user_id, ConnectorCredential.provider == provider
+        ).delete()
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.warning(f"[CONNECTORS] disconnect failed for {provider}/{user_id}: {e}")
+    finally:
+        db.close()
+
+
+@router.post("/{provider}/disconnect")
+def disconnect_connector(provider: str, request: Request):
+    """Removes this user's stored OAuth token (Gmail/Google Drive/Salesforce)
+    and/or their own API-key credentials (GitHub/Jira/ServiceNow/Azure DevOps)
+    for `provider` - whichever applies, the other is a harmless no-op. /status
+    then shows it as not-connected (oauth) or falls back to the shared env var
+    default if one is configured (byok). A fresh /{provider}/auth/login for an
+    oauth provider can link a different account (each client requests the
+    provider's account-chooser / re-login prompt, not a silent same-account
+    reauth - see get_authorization_url in gmail.py, google_drive.py, and
+    salesforce.py)."""
+    provider = _normalize_provider(provider)
+    user_id = _user_id(request)
+    _delete_token_and_credentials(user_id, provider)
+    return {"disconnected": True, "provider": provider}
+
+
+@router.post("/{provider}/credentials")
+def save_connector_credentials(provider: str, request: Request, body: dict = Body(...)):
+    """Lets this user "bring their own key" for a byok connector (GitHub,
+    Jira, ServiceNow, Azure DevOps), overriding the shared app-level env var
+    default for their own requests only - every other user is unaffected."""
+    provider = _normalize_provider(provider)
+    if provider not in BYOK_CREDENTIAL_FIELDS:
+        raise HTTPException(400, f"'{provider}' does not support per-user credentials.")
+    fields = BYOK_CREDENTIAL_FIELDS[provider]
+    body = body or {}
+    missing = [f["key"] for f in fields if not str(body.get(f["key"], "")).strip()]
+    if missing:
+        raise HTTPException(400, f"Missing required field(s): {', '.join(missing)}")
+    creds = {f["key"]: str(body[f["key"]]).strip() for f in fields}
+    user_id = _user_id(request)
+    if not credential_store.save_credentials(user_id, provider, creds):
+        raise HTTPException(503, "Could not save credentials - database unavailable.")
+    return {"saved": True, "provider": provider}
+
+
 @router.get("/status")
 def connectors_status(request: Request):
     """Real per-user connector status - unlike CONNECTOR_POC's old endpoint,
     nothing here is hardcoded demo data. 'configured' reflects actual env vars;
     'connected' additionally checks the per-user token for OAuth connectors."""
     user_id = _user_id(request)
+    # One query each for tokens/credentials across ALL providers, instead of
+    # a separate DB session open/close per oauth or byok provider in the loop
+    # below - this alone took /status from ~4.7s down to well under 1s.
+    connected_tokens = token_store.get_connected_providers(user_id)
+    own_credential_providers = credential_store.get_own_credential_providers(user_id)
+
     sources = []
     for meta in CONNECTOR_CATALOG:
-        configured = _is_configured(meta["id"])
+        shared_configured = _is_configured(meta["id"])
+        own_credentials = False
         if meta["auth"] == "oauth":
-            connected = configured and token_store.get_token(user_id, meta["id"]) is not None
+            configured = shared_configured
+            connected = configured and meta["id"] in connected_tokens
+        elif meta["auth"] == "byok":
+            # "connected" mirrors oauth's meaning exactly: THIS user has their
+            # own key on file - not "a shared admin default happens to work."
+            # The shared env var (shared_configured) is still used as a
+            # fallback by the connector client itself if they haven't set one,
+            # but the UI's Connect/Disconnect toggle is per-user, same as oauth.
+            own_credentials = meta["id"] in own_credential_providers
+            configured = shared_configured or own_credentials
+            connected = own_credentials
         else:
+            configured = shared_configured
             connected = configured
         sources.append({
             **meta,
             "configured": configured,
             "connected": connected,
+            "own_credentials": own_credentials,
             "login_url": f"/connectors/{meta['path']}/auth/login" if meta["auth"] == "oauth" else None,
+            "credential_fields": BYOK_CREDENTIAL_FIELDS.get(meta["id"]) if meta["auth"] == "byok" else None,
         })
     return {
         "connected_count": sum(1 for s in sources if s["connected"]),
@@ -271,11 +413,12 @@ def lms_download_file(file_id: str):
 # ==========================================
 @router.get("/github/repos")
 def list_github_repositories(
+    request: Request,
     visibility: str = Query(default="all"),
     page: int = Query(default=1, ge=1),
     per_page: int = Query(default=30, ge=1, le=100),
 ):
-    connector = get_github_connector()
+    connector = get_github_connector(_user_id(request))
     return connector.list_repositories(visibility=visibility, page=page, per_page=per_page)
 
 
@@ -283,10 +426,11 @@ def list_github_repositories(
 def list_github_contents(
     owner: str,
     repo: str,
+    request: Request,
     path: str = Query(default=""),
     ref: str | None = Query(default=None),
 ):
-    connector = get_github_connector()
+    connector = get_github_connector(_user_id(request))
     return connector.list_contents(owner, repo, path, ref)
 
 
@@ -294,16 +438,16 @@ def list_github_contents(
 def download_github_file(
     owner: str,
     repo: str,
+    request: Request,
     path: str = Query(...),
     ref: str | None = Query(default=None),
 ):
-    connector = get_github_connector()
+    connector = get_github_connector(_user_id(request))
     content, filename = connector.download_file(owner, repo, path, ref)
-    safe_filename = filename.replace('"', "").replace("\r", "").replace("\n", "")
     return Response(
         content=content,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{safe_filename}"'},
+        headers=_content_disposition_header(filename),
     )
 
 
@@ -352,26 +496,26 @@ def gmail_download_attachment(
     filename: str = Query(default="attachment"),
 ):
     connector = get_gmail_connector(_user_id(request))
-    content, safe_filename = connector.download_attachment(message_id, attachment_id, filename)
-    clean_filename = safe_filename.replace('"', "").replace("\r", "").replace("\n", "")
+    content, attachment_filename = connector.download_attachment(message_id, attachment_id, filename)
     return Response(
         content=content,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{clean_filename}"'},
+        headers=_content_disposition_header(attachment_filename),
     )
 
 
 @oauth_callback_router.get("/gmail/callback")
 def gmail_callback(code: str = Query(...), state: str = Query(default="")):
+    # Redirects back into the app instead of leaving the browser on a bare
+    # JSON page - the frontend reads ?connected=gmail on load to reopen the
+    # connectors panel with a fresh, already-connected status, instead of the
+    # user having to manually navigate back and reload it themselves.
     user_id = state
     if not user_id:
         raise HTTPException(400, "Missing state (user id) on Gmail OAuth callback")
     connector = get_gmail_connector(user_id)
     connector.exchange_code_for_token(code)
-    return {
-        "status": "authenticated",
-        "message": "Gmail authentication successful! You can now access /connectors/gmail/messages and /connectors/gmail/status",
-    }
+    return RedirectResponse(url="/?connected=gmail")
 
 
 # ==========================================
@@ -411,11 +555,10 @@ def google_drive_get_file(file_id: str, request: Request):
 def google_drive_download(file_id: str, request: Request):
     connector = get_google_drive_connector(_user_id(request))
     content, filename = connector.download_file(file_id)
-    clean_filename = filename.replace('"', "").replace("\r", "").replace("\n", "")
     return Response(
         content=content,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{clean_filename}"'},
+        headers=_content_disposition_header(filename),
     )
 
 
@@ -426,51 +569,51 @@ def google_drive_callback(code: str = Query(...), state: str = Query(default="")
         raise HTTPException(400, "Missing state (user id) on Google Drive OAuth callback")
     connector = get_google_drive_connector(user_id)
     connector.exchange_code_for_token(code)
-    return {
-        "status": "authenticated",
-        "message": "Google Drive authentication successful! You can now access /connectors/google-drive/files and /connectors/google-drive/status",
-    }
+    return RedirectResponse(url="/?connected=google_drive")
 
 
 # ==========================================
 # ServiceNow Connector Endpoints
 # ==========================================
 @router.get("/servicenow/status")
-def servicenow_status():
-    connector = get_servicenow_connector()
+def servicenow_status(request: Request):
+    connector = get_servicenow_connector(_user_id(request))
     return connector.get_status()
 
 
 @router.get("/servicenow/incidents")
 def servicenow_list_incidents(
+    request: Request,
     max_results: int = Query(default=10, ge=1, le=100),
     query: str = Query(default="", description="ServiceNow query string or filter"),
 ):
-    connector = get_servicenow_connector()
+    connector = get_servicenow_connector(_user_id(request))
     return connector.list_incidents(max_results=max_results, query=query)
 
 
 @router.get("/servicenow/incidents/{sys_id}")
-def servicenow_get_incident(sys_id: str):
-    connector = get_servicenow_connector()
+def servicenow_get_incident(sys_id: str, request: Request):
+    connector = get_servicenow_connector(_user_id(request))
     return connector.get_incident(sys_id)
 
 
 @router.get("/servicenow/requests")
 def servicenow_list_requests(
+    request: Request,
     max_results: int = Query(default=10, ge=1, le=100),
     query: str = Query(default="", description="ServiceNow query string or filter"),
 ):
-    connector = get_servicenow_connector()
+    connector = get_servicenow_connector(_user_id(request))
     return connector.list_requests(max_results=max_results, query=query)
 
 
 @router.get("/servicenow/knowledge")
 def servicenow_search_knowledge(
+    request: Request,
     query: str = Query(default="", description="Search query for knowledge articles"),
     max_results: int = Query(default=10, ge=1, le=100),
 ):
-    connector = get_servicenow_connector()
+    connector = get_servicenow_connector(_user_id(request))
     return connector.search_knowledge(query=query, max_results=max_results)
 
 
@@ -478,29 +621,30 @@ def servicenow_search_knowledge(
 # Jira Connector Endpoints
 # ==========================================
 @router.get("/jira/status")
-def jira_status():
-    connector = get_jira_connector()
+def jira_status(request: Request):
+    connector = get_jira_connector(_user_id(request))
     return connector.get_status()
 
 
 @router.get("/jira/issues")
 def jira_search_issues(
+    request: Request,
     jql: str = Query(default="", description="JQL query to search issues"),
     max_results: int = Query(default=10, ge=1, le=50),
 ):
-    connector = get_jira_connector()
+    connector = get_jira_connector(_user_id(request))
     return connector.search_issues(jql=jql, max_results=max_results)
 
 
 @router.get("/jira/issues/{issue_key}")
-def jira_get_issue(issue_key: str):
-    connector = get_jira_connector()
+def jira_get_issue(issue_key: str, request: Request):
+    connector = get_jira_connector(_user_id(request))
     return connector.get_issue(issue_key)
 
 
 @router.get("/jira/projects")
-def jira_list_projects():
-    connector = get_jira_connector()
+def jira_list_projects(request: Request):
+    connector = get_jira_connector(_user_id(request))
     return connector.list_projects()
 
 
@@ -566,10 +710,7 @@ def salesforce_callback(code: str = Query(...), state: str = Query(default="")):
         raise HTTPException(400, "Missing state (user id) on Salesforce OAuth callback")
     connector = get_salesforce_connector(user_id)
     connector.exchange_code_for_token(code)
-    return {
-        "status": "authenticated",
-        "message": "Salesforce authentication successful! You can now access Salesforce endpoints and /connectors/salesforce/status",
-    }
+    return RedirectResponse(url="/?connected=salesforce")
 
 
 # ==========================================
@@ -609,14 +750,10 @@ def sharepoint_items(drive_id: str, folder_id: str = Query(default="root")):
 def sharepoint_download(drive_id: str, item_id: str):
     try:
         content, filename = SharePointConnector().download_item(drive_id, item_id)
-        safe_filename = filename.replace("\r", "").replace("\n", "")
-        headers = {
-            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(safe_filename, safe='')}"
-        }
         return StreamingResponse(
             BytesIO(content),
             media_type="application/octet-stream",
-            headers=headers,
+            headers=_content_disposition_header(filename),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -665,18 +802,18 @@ def teams_messages(
 # Azure DevOps Repos Endpoints
 # ==========================================
 @router.get("/azure-devops/projects")
-def azure_devops_projects():
+def azure_devops_projects(request: Request):
     try:
-        connector = AzureDevOpsConnector()
+        connector = get_azure_devops_connector(_user_id(request))
         return {"value": connector.list_projects()}
     except AzureDevOpsError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/azure-devops/projects/{project}/repos")
-def azure_devops_repositories(project: str):
+def azure_devops_repositories(project: str, request: Request):
     try:
-        connector = AzureDevOpsConnector()
+        connector = get_azure_devops_connector(_user_id(request))
         return {"value": connector.list_repositories(project)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -688,11 +825,12 @@ def azure_devops_repositories(project: str):
 def azure_devops_items(
     project: str,
     repo_id: str,
+    request: Request,
     path: str = Query(default="/"),
     recursion_level: str = Query(default="Full"),
 ):
     try:
-        connector = AzureDevOpsConnector()
+        connector = get_azure_devops_connector(_user_id(request))
         items = connector.list_items(
             project=project, repository_id=repo_id, path=path, recursion_level=recursion_level,
         )
@@ -707,15 +845,17 @@ def azure_devops_items(
 def azure_devops_file(
     project: str,
     repo_id: str,
+    request: Request,
     path: str = Query(..., description="Repository file path"),
 ):
     try:
-        connector = AzureDevOpsConnector()
+        connector = get_azure_devops_connector(_user_id(request))
         content = connector.get_file(project=project, repository_id=repo_id, path=path)
+        filename = os.path.basename(path.rstrip("/")) or "azure_devops_file"
         return Response(
             content=content,
             media_type="application/octet-stream",
-            headers={"Content-Disposition": "attachment"},
+            headers=_content_disposition_header(filename),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -759,15 +899,15 @@ async def _fetch_connector_file(provider: str, body: dict, user_id: str) -> tupl
         owner, repo, path = body.get("owner"), body.get("repo"), body.get("path")
         if not (owner and repo and path):
             raise HTTPException(400, "owner, repo, and path are required for github")
-        connector = get_github_connector()
+        connector = get_github_connector(user_id)
         return connector.download_file(owner, repo, path, body.get("ref"))
 
-    if provider == "gmail":
-        message_id, attachment_id = body.get("message_id"), body.get("attachment_id")
-        if not (message_id and attachment_id):
-            raise HTTPException(400, "message_id and attachment_id are required for gmail")
-        connector = get_gmail_connector(user_id)
-        return connector.download_attachment(message_id, attachment_id, body.get("filename", "attachment"))
+    # gmail is handled separately in ingest_connector_file() below, not here -
+    # it ingests a whole email (body + every attachment's extracted text)
+    # combined into one document, which needs parse_file() on each
+    # attachment and so must go through pipeline_bridge.py (the one file in
+    # this package allowed to know about RAG internals) rather than this
+    # RAG-agnostic fetch function.
 
     if provider == "google_drive":
         file_id = body.get("file_id")
@@ -792,7 +932,7 @@ async def _fetch_connector_file(provider: str, body: dict, user_id: str) -> tupl
         if not (project and repo_id and path):
             raise HTTPException(400, "project, repo_id, and path are required for azure_devops")
         try:
-            connector = AzureDevOpsConnector()
+            connector = get_azure_devops_connector(user_id)
             content = connector.get_file(project=project, repository_id=repo_id, path=path)
             return content, os.path.basename(path.rstrip("/")) or "azure_devops_file"
         except ValueError as exc:
@@ -804,7 +944,7 @@ async def _fetch_connector_file(provider: str, body: dict, user_id: str) -> tupl
         issue_key = body.get("issue_key")
         if not issue_key:
             raise HTTPException(400, "issue_key is required for jira")
-        connector = get_jira_connector()
+        connector = get_jira_connector(user_id)
         issue = connector.get_issue(issue_key)
         text = (
             f"Jira Issue {issue.get('key')}: {issue.get('summary')}\n"
@@ -820,7 +960,7 @@ async def _fetch_connector_file(provider: str, body: dict, user_id: str) -> tupl
         sys_id = body.get("sys_id")
         if not sys_id:
             raise HTTPException(400, "sys_id is required for servicenow")
-        connector = get_servicenow_connector()
+        connector = get_servicenow_connector(user_id)
         incident = connector.get_incident(sys_id)
         text = "\n".join(f"{k}: {v}" for k, v in incident.items())
         return text.encode("utf-8"), f"servicenow_{sys_id}.txt"
@@ -865,7 +1005,7 @@ async def ingest_connector_file(provider: str, request: Request, body: dict = Bo
       file_share:    {"path": "..."}
       lms:           {"file_id": "..."}
       github:        {"owner": "...", "repo": "...", "path": "...", "ref": "..."}
-      gmail:         {"message_id": "...", "attachment_id": "...", "filename": "..."}
+      gmail:         {"message_id": "..."} - ingests the whole email (body + every attachment's extracted text)
       google_drive:  {"file_id": "..."}
       sharepoint:    {"drive_id": "...", "item_id": "..."}
       azure_devops:  {"project": "...", "repo_id": "...", "path": "..."}
@@ -882,11 +1022,20 @@ async def ingest_connector_file(provider: str, request: Request, body: dict = Bo
     """
     user_id = _user_id(request)
     client_token = f"connector:{user_id}"
+    session_id = body.get("session_id") or None
+
+    if provider == "gmail":
+        message_id = body.get("message_id")
+        if not message_id:
+            raise HTTPException(400, "message_id is required for gmail")
+        return await pipeline_bridge.ingest_gmail_message(
+            message_id=message_id, user_id=user_id, client_token=client_token, session_id=session_id,
+        )
 
     content, filename = await _fetch_connector_file(provider, body, user_id)
 
     return await pipeline_bridge.ingest_bytes(
         provider=provider, content=content, filename=filename,
         user_id=user_id, client_token=client_token,
-        session_id=body.get("session_id") or None,
+        session_id=session_id,
     )

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
 
 from app.connectors import token_store
+from app.connectors.clients.oauth2_token_client import OAuth2TokenClient
 
 AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
@@ -43,6 +44,8 @@ class GoogleDriveConnector:
                 detail="GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET not configured in .env",
             )
 
+        self._oauth = OAuth2TokenClient(user_id, PROVIDER, self.client_id, self.client_secret, TOKEN_ENDPOINT)
+
     def get_authorization_url(self) -> str:
         params = {
             "client_id": self.client_id,
@@ -50,62 +53,40 @@ class GoogleDriveConnector:
             "response_type": "code",
             "scope": " ".join(SCOPES),
             "access_type": "offline",
-            "prompt": "consent",
+            "prompt": "consent select_account",
             "state": self.user_id,
         }
         return f"{AUTH_ENDPOINT}?{urllib.parse.urlencode(params)}"
 
     def exchange_code_for_token(self, code: str) -> dict:
-        data = urllib.parse.urlencode({
+        form = {
             "code": code,
             "client_id": self.client_id,
             "client_secret": self.client_secret,
             "redirect_uri": self.redirect_uri,
             "grant_type": "authorization_code",
-        }).encode("utf-8")
-
-        req = urllib.request.Request(
-            TOKEN_ENDPOINT,
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
-
+        }
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                token_data = json.loads(resp.read().decode("utf-8"))
+            token_data = self._oauth.post_token_endpoint(form)
         except urllib.error.HTTPError as exc:
             err_body = exc.read().decode("utf-8", errors="replace")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Token exchange failed: {err_body}",
-            )
+            raise HTTPException(status_code=400, detail=f"Token exchange failed: {err_body}")
         except Exception as e:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Failed to reach Google OAuth: {str(e)}",
-            )
+            raise HTTPException(status_code=502, detail=f"Failed to reach Google OAuth: {str(e)}")
 
-        expires_in = token_data.get("expires_in", 3600)
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+        expires_at = self._oauth.expires_at_from(token_data)
 
         refresh_token = token_data.get("refresh_token")
         if not refresh_token:
-            existing = token_store.get_token(self.user_id, PROVIDER)
+            existing = self._oauth.stored_token()
             if existing:
                 refresh_token = existing.get("refresh_token")
 
-        token_store.save_token(
-            self.user_id, PROVIDER,
-            access_token=token_data["access_token"],
-            refresh_token=refresh_token,
-            expires_at=expires_at,
-        )
-
+        self._oauth.save(token_data["access_token"], refresh_token, expires_at)
         return token_data
 
     def _get_valid_token(self) -> str:
-        row = token_store.get_token(self.user_id, PROVIDER)
+        row = self._oauth.stored_token()
         if row is None:
             raise HTTPException(
                 status_code=401,
@@ -113,10 +94,9 @@ class GoogleDriveConnector:
             )
 
         access_token = row["access_token"]
-        expires_at = row["expires_at"]
         refresh_token = row["refresh_token"]
 
-        if expires_at is None or datetime.now(timezone.utc) > (expires_at - timedelta(seconds=60)):
+        if self._oauth.is_expiring(row["expires_at"]):
             if not refresh_token:
                 raise HTTPException(
                     status_code=401,
@@ -127,23 +107,14 @@ class GoogleDriveConnector:
         return access_token
 
     def _refresh_access_token(self, refresh_token: str) -> str:
-        data = urllib.parse.urlencode({
+        form = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
             "refresh_token": refresh_token,
             "grant_type": "refresh_token",
-        }).encode("utf-8")
-
-        req = urllib.request.Request(
-            TOKEN_ENDPOINT,
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
-
+        }
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                new_data = json.loads(resp.read().decode("utf-8"))
+            new_data = self._oauth.post_token_endpoint(form)
         except Exception as exc:
             raise HTTPException(
                 status_code=401,
@@ -151,13 +122,7 @@ class GoogleDriveConnector:
             )
 
         new_access = new_data["access_token"]
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=new_data.get("expires_in", 3600))
-        token_store.save_token(
-            self.user_id, PROVIDER,
-            access_token=new_access,
-            refresh_token=refresh_token,
-            expires_at=expires_at,
-        )
+        self._oauth.save(new_access, refresh_token, self._oauth.expires_at_from(new_data))
         return new_access
 
     def _api_request(self, endpoint: str, params: dict | None = None) -> dict:

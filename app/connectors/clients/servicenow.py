@@ -269,6 +269,15 @@ class ServiceNowConnector:
         }
 
 
-def get_servicenow_connector() -> ServiceNowConnector:
-    """Factory function returning a ServiceNowConnector instance."""
-    return ServiceNowConnector()
+def get_servicenow_connector(user_id: str | None = None) -> ServiceNowConnector:
+    """Uses this user's own credentials (from connector_credentials) if
+    they've set them, otherwise falls back to the shared SERVICENOW_* env vars."""
+    creds = {}
+    if user_id:
+        from app.connectors import credential_store
+        creds = credential_store.get_credentials(user_id, "servicenow") or {}
+    return ServiceNowConnector(
+        instance_url=creds.get("instance_url"),
+        username=creds.get("username"),
+        password=creds.get("password"),
+    )
