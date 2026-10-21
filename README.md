@@ -29,6 +29,7 @@ Chat with your data. Upload PDFs, scrape URLs, or pull from JSON APIs - then ask
 | **Embeddings** | `BAAI/bge-large-en-v1.5` via HuggingFace Inference API (free) → OpenAI fallback |
 | **Document Parsing** | LiteParse v2 - Rust-based, page-level metadata, runs off event loop |
 | **URL Scraping** | Crawl4AI → Playwright Chromium fallback |
+| **Source Connectors** | `app/connectors/` - Gmail, Google Drive, GitHub, Jira, ServiceNow, Salesforce, SharePoint, Teams, Azure DevOps, File Share, LMS |
 | **Container** | Docker - Python 3.13-slim, non-root user |
 | **Deployment** | HuggingFace Spaces (free) |
 | **Migrations** | Alembic |
@@ -224,6 +225,42 @@ Identical questions (same session, same question text, same mode) are served fro
 
 ---
 
+## Source Connectors
+
+Beyond uploading a file, pasting a URL, or hitting an API, you can pull content
+straight from 11 connected source systems and chat with it the same way:
+**Gmail, Google Drive, GitHub, Jira, ServiceNow, Salesforce, SharePoint,
+Microsoft Teams, Azure DevOps Repos, a local File Share, and a mock LMS.**
+
+Click **Connect a Data Source** in the sidebar, pick a connector, and either
+authorize it (Gmail/Google Drive/Salesforce use OAuth) or browse straight in
+(connectors using a single shared service credential). Picking a file or
+record runs it through the exact same parse → chunk → embed → dedup pipeline
+as a normal upload, landing in a session you can immediately chat with.
+
+**Two layers of access control, not one:**
+1. Normal login (the same Bearer token that protects `/chat/` and `/upload/`).
+2. A separate **connectors access key** (`CONNECTORS_ACCESS_KEY` in `.env`) -
+   every `/connectors/*` route is locked behind this second secret, checked
+   in constant time server-side, independent of the regular login. This
+   exists because connecting Gmail/GitHub/Jira/Salesforce is real access to
+   someone's real third-party account, not just app data, so it gets its own
+   gate rather than relying solely on normal login. See
+   `app/connectors/README.md` for exactly how the unlock flow works.
+
+Per-user isolation: OAuth tokens (Gmail, Google Drive, Salesforce) are stored
+per logged-in user in a `connector_tokens` table, not in a shared file - one
+user connecting their Gmail never exposes it to anyone else using the app.
+
+The whole feature lives in a single self-contained package, `app/connectors/`,
+deliberately built so it can be lifted into a different host app with minimal
+untangling - only one file (`pipeline_bridge.py`) knows anything about this
+project's specific RAG pipeline. Full technical breakdown (env vars per
+connector, the DB schema, the access-gate flow, how to re-wire the ingestion
+adapter for a different app) is in `app/connectors/README.md`.
+
+---
+
 ## Quickstart
 
 **Requirements:** Python 3.13, [uv](https://docs.astral.sh/uv/getting-started/installation/)
@@ -283,6 +320,12 @@ NEO4J_USER=neo4j
 NEO4J_PASSWORD=your-password
 
 APP_ENV=development
+
+# Source Connectors - required before any connector works at all
+CONNECTORS_ACCESS_KEY=your-connectors-access-key
+# Per-connector credentials (Google, Microsoft, Azure DevOps, GitHub, Jira,
+# ServiceNow, Salesforce, File Share) - see env.example for the full list,
+# or app/connectors/README.md for what each one is used for.
 ```
 
 Model names, retrieval tuning, and upload limits are all in `config.yaml` - edit there, no code changes needed.
@@ -291,9 +334,10 @@ Model names, retrieval tuning, and upload limits are all in `config.yaml` - edit
 
 ## Features
 
-- **File upload** - PDF, DOC, DOCX, TXT. Drag & drop supported. Up to 5 files, 50 MB total per session.
+- **File upload** - PDF, DOC, DOCX, TXT, MD. Drag & drop supported. Up to 5 files, 50 MB total per session.
 - **URL scraping** - paste any URL and chat with the page content. Handles JS-rendered pages.
 - **JSON API ingestion** - point at any API endpoint, add auth headers if needed.
+- **Source connectors** - pull a file or record straight from Gmail, Google Drive, GitHub, Jira, ServiceNow, Salesforce, SharePoint, Teams, Azure DevOps, a file share, or a mock LMS, and chat with it the same way as an upload. Gated behind a separate access key on top of normal login - see [Source Connectors](#source-connectors).
 - **Cited answers** - every answer shows source file, page number, and OCR confidence.
 - **Thinking Mode** - ReAct agent that shows step-by-step reasoning. Includes clarification when your question is genuinely ambiguous across multiple documents.
 - **Advanced Mode** - toggle in the chat UI for deeper answers using graph traversal.
@@ -313,15 +357,22 @@ Model names, retrieval tuning, and upload limits are all in `config.yaml` - edit
 | `POST` | `/auth/send-otp` | Send OTP email for login |
 | `POST` | `/auth/verify-otp` | Verify OTP - returns JWT |
 | `POST` | `/auth/guest` | Get a guest token (no email needed) |
-| `POST` | `/upload/files` | Upload PDF/DOC/DOCX/TXT - streams SSE progress |
+| `POST` | `/upload/files` | Upload PDF/DOC/DOCX/TXT/MD - streams SSE progress |
 | `POST` | `/upload/url` | Scrape a URL - streams SSE progress |
 | `POST` | `/upload/api` | Fetch a JSON API with optional auth headers |
 | `POST` | `/chat/` | Ask a question - returns answer + citations + elapsed_ms |
+| `GET` | `/connectors/status` | Live configured/connected status for all 11 connectors |
+| `POST` | `/connectors/unlock` | Exchange the access key for a short-lived unlock token |
+| `GET` | `/connectors/{provider}/...` | Browse a connector's data (listing endpoints per provider) |
+| `POST` | `/connectors/{provider}/ingest` | Ingest a picked file/record - same pipeline as `/upload/files` |
 
 **Upload/Chat headers:**
-- `Authorization: Bearer <token>` - required on all `/upload/` and `/chat/` routes
+- `Authorization: Bearer <token>` - required on all `/upload/`, `/chat/`, and `/connectors/` routes
 - `X-Advanced-Mode: true` - enables Advanced Mode pipeline
 - `X-Thinking-Mode: true` - enables Thinking Mode (ReAct agent with step-by-step reasoning)
+
+**Connector headers:**
+- `X-Connectors-Unlock: <token>` - required on every `/connectors/` route except `/connectors/unlock` itself; obtained from `/connectors/unlock`
 
 ---
 
@@ -335,6 +386,13 @@ app/
 │   ├── upload.py        # Upload endpoints (SSE streaming, parallel embedding)
 │   ├── chat.py          # Chat endpoint
 │   └── auth.py          # OTP login + guest token endpoints
+├── connectors/           # Self-contained source-connector package (see its own README.md)
+│   ├── clients/          # 11 connector clients (Gmail, GitHub, Jira, etc.)
+│   ├── access_gate.py    # CONNECTORS_ACCESS_KEY unlock/verify logic
+│   ├── token_store.py    # Per-user OAuth token persistence
+│   ├── models.py         # ConnectorToken model (its own declarative_base)
+│   ├── pipeline_bridge.py # The one file wired to this app's RAG pipeline
+│   └── router.py         # FastAPI routers (data, unlock, OAuth callbacks)
 ├── services/
 │   ├── rag.py           # LangGraph pipelines, ReAct agent (Thinking Mode), intent, history, cache, fallbacks
 │   ├── ingestion.py     # LiteParse (non-blocking), Crawl4AI, Playwright, httpx

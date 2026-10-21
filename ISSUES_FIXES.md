@@ -3,6 +3,371 @@
 
 ---
 
+# Session date: 2026-10-20 - Source Connector Integration & Security
+
+Scope: integrating CONNECTOR_POC's 10+1 source-system connectors (Gmail, Google
+Drive, GitHub, Jira, ServiceNow, Salesforce, SharePoint, Teams, Azure DevOps,
+File Share, LMS) into the real app, end to end - backend, frontend, security,
+and the refactor into a standalone package.
+
+---
+
+## 1. Per-user token isolation (security)
+
+### Problem
+CONNECTOR_POC stored each OAuth connector's token (Gmail, Google Drive,
+Salesforce) in a single flat file on disk (e.g. `.gmail_token.json`) with no
+concept of "whose" it was. In a multi-user app, whichever user connected
+Gmail first became *the* Gmail connection for every user - User B would see
+User A's inbox.
+
+### Fix
+New `connector_tokens` DB table (`user_id`, `provider`, `access_token`,
+`refresh_token`, `expires_at`, `extra`), unique on `(user_id, provider)`.
+Every connector call now looks up the token scoped to the authenticated
+user making the request, never a shared file.
+
+### Files changed
+- `app/connectors/models.py` (`ConnectorToken` model)
+- `app/connectors/token_store.py`
+- `alembic/versions/003_connector_tokens.py`
+
+---
+
+## 2. GitHub connector depended on a local `gh` CLI login
+
+### Problem
+The original connector shelled out to `gh auth token` to get a GitHub token -
+works on a developer's own machine where `gh` is logged in, but has no
+equivalent in a deployed container, and isn't tied to any specific user.
+
+### Fix
+Replaced with a plain `GITHUB_TOKEN` env var, read directly - no subprocess,
+no CLI dependency.
+
+### Files changed
+- `app/connectors/clients/github.py`
+
+---
+
+## 3. Connector "configured" status falsely reported placeholders as real
+
+### Problem
+The first version of `GET /connectors/status` only checked that an env var
+was non-empty. Since every connector's `.env` entry was pre-filled with
+placeholder text (e.g. `GITHUB_TOKEN=your-github-personal-access-token`),
+every connector showed as "Connected" when nothing was actually configured.
+
+### Fix
+Added `_is_placeholder()` - flags any value still containing `your-`, and for
+File Share, additionally verifies the directory actually exists on disk.
+Re-verified live: went from a false "8/11 connected" down to the correct
+"1/11" (only the no-config-needed LMS mock).
+
+### Files changed
+- `app/connectors/router.py`
+
+---
+
+## 4. Embedding failures during connector ingest crashed with a raw 500
+
+### Problem
+`POST /connectors/{provider}/ingest` had no try/except around the embedding
+call. When the HuggingFace account ran out of inference credits mid-test,
+the endpoint returned a bare "Internal Server Error" instead of a usable
+message - the same failure the normal `/upload/files` path already handles
+cleanly.
+
+### Fix
+Wrapped the embed step in try/except, returning
+`"Failed to embed {filename}. Check your embedding provider (e.g. HuggingFace
+credits) and try again."` with a 502, matching the existing upload behaviour.
+Verified live: same failure now returns the clean message instead of a crash.
+
+### Files changed
+- `app/connectors/pipeline_bridge.py`
+
+---
+
+## 5. OAuth redirect URI port mismatch broke Gmail/Drive/Salesforce login
+
+### Problem
+`.env` had `GOOGLE_REDIRECT_URI` / `GOOGLE_DRIVE_REDIRECT_URI` /
+`SALESFORCE_REDIRECT_URI` pointing at port 8000, but the app actually runs on
+port 8001. Google/Salesforce would redirect the browser back to a port
+nothing was listening on, breaking the login flow before it could even start.
+
+### Fix
+Updated all three to port 8001 to match the real running server; documented
+that whoever registers the OAuth app in Google Cloud Console / Salesforce
+must register the exact matching URI.
+
+### Files changed
+- `.env`
+
+---
+
+## 6. Salesforce OAuth rejected with "missing required code challenge"
+
+### Problem
+Salesforce's Connected App requires PKCE (`code_challenge` /
+`code_verifier`) on the Web Server OAuth flow; the connector never sent one.
+
+### Fix
+Added `_new_pkce_pair()` (S256 challenge/verifier, RFC 7636), stored the
+verifier in a short-lived in-memory map keyed by user_id during the
+authorization step, and sent it back on token exchange.
+
+### Files changed
+- `app/connectors/clients/salesforce.py`
+
+---
+
+## 7. Gmail / Google Drive silently capped results with no way to see more
+
+### Problem
+The browse popups fetched a hardcoded `max_results=20` (Gmail) / `100`
+(Google Drive) with no pagination at all - if you had more messages/files
+than that, the rest were simply invisible, with no indication anything was
+missing.
+
+### Fix
+Added `page_token` support end to end (connector client → router → frontend)
+and a "Load more" button that appends the next batch instead of replacing
+the list, using the real `next_page_token` the Gmail/Drive APIs already
+return.
+
+### Files changed
+- `app/connectors/clients/gmail.py`, `google_drive.py`
+- `app/connectors/router.py`
+- `app/static/chat.js`
+
+---
+
+## 8. UI: hamburger sidebar toggle overlapped the Connect panel
+
+### Problem
+`.sidebar-hamburger` is `position: fixed` at a coordinate that physically
+overlapped the top-right ~24x18px corner of whatever sat at the top of the
+sidebar (the Connect panel's info note, and the Files/URL/API tabs row).
+Confirmed by measuring actual DOM rects in a live browser, not just visually.
+
+### Fix
+Increased `.sidebar`'s top padding so its content always clears the
+hamburger button's full footprint. Re-measured after the fix: clean 8px gap,
+no overlap.
+
+### Files changed
+- `app/static/style.css`
+
+---
+
+## 9. UI: zero gap between the Connect panel's note and the connector list
+
+### Problem
+`#connectors-section` had no layout/gap rule of its own, so its note bar and
+the connector list sat flush against each other with 0px spacing - measured
+directly in the DOM, confirmed.
+
+### Fix
+Added `display:flex; flex-direction:column; gap:10px` to `#connectors-section`,
+matching the spacing already used in the Files/URL/API tabs panel.
+
+### Files changed
+- `app/static/style.css`
+
+---
+
+## 10. UI: "Browse" button was white for some connectors, purple for others
+
+### Problem
+The button got a `secondary` (white/outlined) CSS class specifically for
+Gmail/Google Drive/Salesforce once connected, while every other connector's
+"Browse" stayed solid purple - an arbitrary inconsistency with no reason
+behind it.
+
+### Fix
+Removed the `secondary` variant entirely; every enabled Browse/Connect
+button is now the same solid purple, the only other state being the greyed
+out "not configured" disabled look.
+
+### Files changed
+- `app/static/chat.js`, `style.css`
+
+---
+
+## 11. Dev server stuck in a near-continuous self-restart loop
+
+### Problem
+`uvicorn --reload` was watching the whole project directory, including
+`logs/app.log`. Every log line written re-triggered the file watcher, which
+logged another "change detected" line, which re-triggered itself - a
+feedback loop causing a full server restart (and full warmup: embeddings,
+Docling models, etc.) roughly every 20-25 seconds, discovered by noticing
+30,000+ near-identical log lines.
+
+### Fix
+`--reload-exclude "logs/*"` added to the documented run command.
+
+### Files changed
+- `README.md`
+
+---
+
+## 12. Connector code was tangled into the rest of the app
+
+### Problem
+Connector clients, the router, and the OAuth token model were scattered
+across `app/services/connectors/`, `app/routers/connectors.py`, and
+`app/models/db.py` alongside unrelated app models - hard to hand off to a
+different project without untangling RAG-pipeline-specific code from the
+connector logic.
+
+### Fix
+Extracted everything into a single self-contained `app/connectors/` package
+(`clients/`, `token_store.py`, `models.py` with its own independent
+`declarative_base()`, `router.py`, and `access_gate.py`), with exactly one
+file - `pipeline_bridge.py` - allowed to import this app's RAG internals.
+A different host app only needs to rewrite that one file to reuse the whole
+package. Verified afterward: route count unchanged (50 `/connectors/*`
+paths before and after), and a real ingest-then-chat round trip re-tested
+live to confirm the pipeline extraction changed nothing behaviourally.
+
+### Files changed
+- New `app/connectors/` package; deleted old `app/services/connectors/` and
+  `app/routers/connectors.py`; `app/main.py`, `app/models/db.py` updated
+
+---
+
+## 13. Six connectors had no browse UI at all
+
+### Problem
+SharePoint, Microsoft Teams, Azure DevOps, Jira, ServiceNow, and Salesforce
+showed a "browsing UI isn't built yet" placeholder - only File Share, LMS,
+GitHub, Gmail, and Google Drive had working pickers.
+
+### Fix
+Built real nested browse-and-pick popups for all six, reading each
+connector's actual field shapes from source rather than guessing by analogy
+(SharePoint/Azure DevOps return raw vendor API shapes; Jira/ServiceNow/
+Salesforce are normalized - genuinely different). Live-verified against real
+accounts where credentials existed (Jira, Azure DevOps); confirmed clean
+error handling (not crashes) where credentials were still placeholders
+(ServiceNow, Teams) or OAuth wasn't yet completed (Salesforce).
+
+### Files changed
+- `app/static/chat.js`
+
+---
+
+## 14. No access control beyond normal login for connecting real third-party accounts
+
+### Problem
+Any logged-in user (including a guest) could connect Gmail/GitHub/Jira/
+Salesforce with no additional gate - risky given a connected session is real
+access to someone's real external account, not just app data.
+
+### Fix
+Added a second, independent lock: `CONNECTORS_ACCESS_KEY` (freshly generated
+random secret, `.env`-only). Every `/connectors/*` route now requires a
+short-lived, per-user signed "unlock token" obtained by first submitting the
+real key via `POST /connectors/unlock`; comparison is constant-time
+(`hmac.compare_digest`) so a wrong guess can't be timed. Verified live:
+locked by default (403), wrong key rejected (403, with the raw key never
+stored/echoed), correct key unlocks, a different user's token is rejected
+even if stolen (scoped to `user_id` in the signed payload).
+
+### Files changed
+- `app/connectors/access_gate.py` (new)
+- `app/connectors/router.py`, `app/main.py`
+- `app/static/chat.js`, `style.css`, `index.html`
+
+---
+
+## 15. Access-key bug: a wrong key logged the user out of their whole account
+
+### Problem
+The first version returned `401` for "incorrect access key." This frontend
+already treats any `401` as "your login session is invalid" and force-logs-
+out the user - so typing the wrong connectors key (a completely separate,
+lower-stakes thing) was logging people out of ARIA entirely. Caught live
+during testing, not just in review.
+
+### Fix
+Changed "incorrect access key" to `403` (forbidden, not unauthorized) so it
+can never collide with the login-session check. Re-tested after the fix:
+wrong key now shows a clean inline error with the user still logged in.
+
+### Files changed
+- `app/connectors/router.py`
+
+---
+
+## 16. `.md` files were rejected by both upload and connector ingestion
+
+### Problem
+`ALLOWED_EXTENSIONS` only included `.pdf/.doc/.docx/.txt`; Markdown files
+from GitHub, File Share, or a direct upload were rejected outright, and even
+if allowed, would have been wrongly routed through the PDF/DOCX document
+parser instead of read as plain text.
+
+### Fix
+Added `.md` to `ALLOWED_EXTENSIONS` (shared by regular upload and the
+connector ingest bridge) and to `parse_file()`'s plain-text fast path
+(same as `.txt`). Verified live: uploaded a real `.md` file, confirmed it
+parsed as raw text (not garbled through Docling), embedded, and answered a
+follow-up chat question with a correct citation.
+
+### Files changed
+- `app/routers/upload.py`, `app/services/ingestion.py`
+- `app/static/chat.js`, `index.html`, `auth.html`
+
+---
+
+## 17. Chat session is lost on page refresh (diagnosed, fix in progress)
+
+### Problem
+`state.sessionId` (which session the chat box talks to) exists only in
+in-memory JS state - never written to `localStorage`. A page refresh or new
+tab silently resets it to a brand-new empty session with no warning. Traced
+a real user report ("I asked about lesson 2 and it said it had no
+information") to exactly this: the file had been ingested successfully
+(confirmed via a direct DB query and a direct API call against the real
+session, which answered correctly with a citation) - the chat UI was simply
+asking the wrong, newly-generated empty session instead of the one the file
+actually lived in.
+
+### Status
+Root cause confirmed and reproduced. Fix (persist the active session id to
+`localStorage`, mirroring how the login token already persists) identified
+but not yet implemented.
+
+---
+
+## Summary Table
+
+| # | Issue | File(s) | Status |
+|---|---|---|---|
+| 1 | Shared OAuth token file leaked one user's connection to all users | `token_store.py`, `models.py` | Fixed |
+| 2 | GitHub connector depended on local `gh` CLI login | `github.py` | Fixed |
+| 3 | Placeholder env values falsely reported as "configured" | `router.py` | Fixed |
+| 4 | Embedding failure during ingest crashed with raw 500 | `pipeline_bridge.py` | Fixed |
+| 5 | OAuth redirect URIs pointed at the wrong port | `.env` | Fixed |
+| 6 | Salesforce OAuth missing required PKCE code challenge | `salesforce.py` | Fixed |
+| 7 | Gmail/Drive silently capped results, no pagination | `gmail.py`, `google_drive.py`, `chat.js` | Fixed |
+| 8 | Hamburger button overlapped the Connect panel | `style.css` | Fixed |
+| 9 | Zero spacing between Connect panel note and list | `style.css` | Fixed |
+| 10 | Inconsistent Browse button colors across connectors | `chat.js`, `style.css` | Fixed |
+| 11 | Dev server stuck in a self-triggered restart loop | `README.md` | Fixed |
+| 12 | Connector code tangled into the rest of the app | `app/connectors/*` | Fixed (refactor) |
+| 13 | 6 of 11 connectors had no browse UI | `chat.js` | Fixed |
+| 14 | No extra access control for connecting real third-party accounts | `access_gate.py`, `router.py` | Fixed |
+| 15 | Wrong access key logged the user out of their whole account | `router.py` | Fixed |
+| 16 | `.md` files rejected by upload and ingestion | `upload.py`, `ingestion.py` | Fixed |
+| 17 | Chat session lost on page refresh, misattributed as a RAG bug | `chat.js` | Diagnosed, fix pending |
+
+---
+
 ## Plans & Design Decisions Made Today
 
 ### Plan 1 - Ambiguity & Clarification Feature
