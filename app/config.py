@@ -60,6 +60,8 @@ class _Config:
         self.max_files_per_session: int = int(lim.get("max_files_per_session", 5))
         self.max_session_size_mb: int   = int(lim.get("max_session_size_mb", 50))
         self.dedup_threshold_mb: float  = float(lim.get("dedup_threshold_mb", 2))
+        self.gmail_bulk_ingest_limit: int = int(lim.get("gmail_bulk_ingest_limit", 500))
+        self.zip_max_entries: int       = int(lim.get("zip_max_entries", 200))
 
         # ── Secrets - from .env only ─────────────────────────────
         self.groq_api_key: str    = os.getenv("GROQ_API_KEY", "")
@@ -82,6 +84,10 @@ class _Config:
         self.jwt_secret: str     = os.getenv("JWT_SECRET", "change-me-in-production-use-a-long-random-string")
         self.jwt_algorithm: str  = "HS256"
         self.jwt_expire_hours: int = 24
+
+        # ── Admin portal (single fixed super-admin account, set in .env) ──
+        self.admin_email: str    = os.getenv("ADMIN_EMAIL", "")
+        self.admin_password: str = os.getenv("ADMIN_PASSWORD", "")
 
         # ── Neo4j ─────────────────────────────────────────────────
         self.neo4j_uri: str      = os.getenv("NEO4J_URI", "")

@@ -1,6 +1,0 @@
-REST API Fundamentals
-
-Topics:
-- HTTP methods
-- Request and response
-- Status codes

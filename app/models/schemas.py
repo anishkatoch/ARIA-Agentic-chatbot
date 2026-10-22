@@ -28,6 +28,7 @@ class IngestResponse(BaseModel):
 class ChatRequest(BaseModel):
     session_id: UUID
     question: str
+    knowledge_base_id: Optional[UUID] = None
 
 
 class ChatResponse(BaseModel):
@@ -45,3 +46,39 @@ class ConfirmRequest(BaseModel):
 class ConfirmResponse(BaseModel):
     status: str
     message: str
+
+
+class KnowledgeBaseCreateRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+
+class KnowledgeBaseUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[Literal["active", "inactive"]] = None
+
+
+class KnowledgeBaseOut(BaseModel):
+    id: UUID
+    name: str
+    description: Optional[str] = None
+    status: str
+    document_count: int = 0
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class KnowledgeBasePublicOut(BaseModel):
+    id: UUID
+    name: str
+    description: Optional[str] = None
+
+
+class KnowledgeBaseDocumentOut(BaseModel):
+    id: UUID
+    filename: str
+    file_size: int
+    chunks_stored: Optional[int] = None
+    status: str
+    uploaded_at: Optional[str] = None

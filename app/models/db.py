@@ -66,6 +66,41 @@ class ChatHistory(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class KnowledgeBase(Base):
+    """An admin-curated, shared document set. Backed by its own vector-store
+    collection (session_id), same mechanism as a regular user session - a KB
+    is just a named, admin-owned session that every user can be pointed at."""
+    __tablename__ = "knowledge_bases"
+
+    id          = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name        = Column(String, nullable=False, unique=True)
+    description = Column(Text, nullable=True)
+    session_id  = Column(String, nullable=False, unique=True, default=lambda: str(uuid.uuid4()))
+    status      = Column(String, nullable=False, default="active")  # active | inactive
+    created_by  = Column(String, nullable=True)  # admin email
+    created_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                          onupdate=lambda: datetime.now(timezone.utc))
+
+
+class KnowledgeBaseDocument(Base):
+    """A single file bundled into a KnowledgeBase."""
+    __tablename__ = "knowledge_base_documents"
+
+    id                = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    knowledge_base_id = Column(UUID(as_uuid=True), ForeignKey("knowledge_bases.id"), nullable=False)
+    filename          = Column(String, nullable=False)
+    file_size         = Column(BigInteger, nullable=False)
+    chunks_stored     = Column(BigInteger, nullable=True)
+    status            = Column(String, nullable=False, default="pending")  # pending | complete | failed
+    vector_ids        = Column(Text, nullable=True)  # comma-separated vectorstore ids, for targeted delete
+    uploaded_at       = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index("ix_kb_documents_knowledge_base_id", "knowledge_base_id"),
+    )
+
+
 class EmbeddingModelUsage(Base):
     """Cumulative token usage per embedding model - lets the app auto-switch
     to the next model in the priority list once a model's free quota is used

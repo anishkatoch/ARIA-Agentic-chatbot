@@ -34,6 +34,10 @@ class VerifyOtpRequest(BaseModel):
 class ResendOtpRequest(BaseModel):
     email: EmailStr
 
+class AdminLoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
 class AuthResponse(BaseModel):
     token: str | None
     needs_otp: bool = False
@@ -64,6 +68,26 @@ async def signin(req: SignInRequest):
     except Exception as e:
         logger.error(f"[AUTH] Signin error: {e}")
         raise HTTPException(500, "Sign in failed. Please try again.")
+
+
+@router.post("/admin-login", response_model=AuthResponse)
+async def admin_login(req: AdminLoginRequest):
+    """The only way to obtain an admin session - no signup, no OTP, no social
+    login. Backs the single fixed super-admin account that runs /admin.html."""
+    from app.services import admin_auth
+    if not admin_auth.verify_admin_credentials(req.email, req.password):
+        raise HTTPException(401, "Invalid admin credentials")
+    token = admin_auth.issue_admin_token()
+    logger.info(f"[AUTH] Admin signin: {req.email}")
+    return {
+        "token": token,
+        "user": {
+            "id":    "admin",
+            "email": req.email,
+            "name":  "Admin",
+            "role":  "admin",
+        },
+    }
 
 
 @router.post("/guest", response_model=AuthResponse)

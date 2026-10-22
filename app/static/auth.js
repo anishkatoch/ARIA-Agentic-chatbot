@@ -23,6 +23,8 @@ async function initOAuth() {
     _sb = supabase.createClient(cfg.supabase_url, cfg.supabase_anon_key);
     document.getElementById('oauth-divider').classList.remove('hidden');
     document.getElementById('oauth-buttons').classList.remove('hidden');
+    document.getElementById('oauth-divider-signup').classList.remove('hidden');
+    document.getElementById('oauth-buttons-signup').classList.remove('hidden');
 
     // Supabase's client auto-parses the access token out of the URL
     // fragment when this page is the OAuth redirect target, so a session
@@ -43,8 +45,8 @@ async function initOAuth() {
 }
 initOAuth();
 
-async function handleOAuthSignin(provider) {
-  const errEl = document.getElementById('oauth-error');
+async function handleOAuthSignin(provider, errorElId = 'oauth-error') {
+  const errEl = document.getElementById(errorElId);
   errEl.classList.add('hidden');
   if (!_sb) return;
   const { error } = await _sb.auth.signInWithOAuth({

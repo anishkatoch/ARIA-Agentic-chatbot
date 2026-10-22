@@ -30,17 +30,17 @@ Base = declarative_base()
 
 class ConnectorToken(Base):
     """Per-user OAuth token storage for connectors that need user-scoped auth
-    (Gmail, Google Drive, Salesforce). Replaces CONNECTOR_POC's flat JSON token
+    (Gmail, Google Drive). Replaces CONNECTOR_POC's flat JSON token
     cache files (.gmail_token.json etc.), which had no concept of "which user"."""
     __tablename__ = "connector_tokens"
 
     id            = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id       = Column(String, nullable=False, index=True)  # NOT UUID - guest ids look like "guest-<email>", Supabase ids are UUID strings; store as plain String to fit both
-    provider      = Column(String, nullable=False)  # "gmail" | "google_drive" | "salesforce"
+    provider      = Column(String, nullable=False)  # "gmail" | "google_drive"
     access_token  = Column(Text, nullable=False)
     refresh_token = Column(Text, nullable=True)
     expires_at    = Column(DateTime, nullable=True)
-    extra         = Column(Text, nullable=True)  # JSON-encoded provider-specific metadata (e.g. Salesforce instance_url)
+    extra         = Column(Text, nullable=True)  # JSON-encoded provider-specific metadata
     created_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at    = Column(DateTime, default=lambda: datetime.now(timezone.utc),
                             onupdate=lambda: datetime.now(timezone.utc))
@@ -52,21 +52,20 @@ class ConnectorToken(Base):
 
 class ConnectorCredential(Base):
     """Per-user override of an API-key-style connector's credentials (GitHub
-    PAT, Jira base_url+email+token, ServiceNow instance+username+password,
-    Azure DevOps org_url+PAT). These 4 connectors otherwise fall back to a
+    PAT, Azure DevOps org_url+PAT). These connectors otherwise fall back to a
     single shared app-level env var - a row here lets one user "bring their
     own key" that takes priority for their own requests only, without
     affecting any other user or requiring an env var / server restart.
 
     Distinct from ConnectorToken (OAuth access/refresh tokens for Gmail/
-    Google Drive/Salesforce, which are obtained via a login redirect, not
-    typed in by hand) - `credentials` is a single JSON blob since each of
-    these 4 providers' credential shape is different."""
+    Google Drive, which are obtained via a login redirect, not
+    typed in by hand) - `credentials` is a single JSON blob since each
+    provider's credential shape is different."""
     __tablename__ = "connector_credentials"
 
     id          = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id     = Column(String, nullable=False, index=True)
-    provider    = Column(String, nullable=False)  # "github" | "jira" | "servicenow" | "azure_devops"
+    provider    = Column(String, nullable=False)  # "github" | "azure_devops"
     credentials = Column(Text, nullable=False)     # JSON-encoded, shape varies by provider
     created_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc),

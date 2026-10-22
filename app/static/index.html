@@ -38,23 +38,19 @@
       </div>
     </div>
     <div class="header-right">
-      <div class="advanced-toggle-wrap">
-        <label class="advanced-toggle-label" for="advanced-toggle" aria-label="Advanced mode">
-          <input type="checkbox" id="advanced-toggle" />
-          <span class="advanced-toggle-slider"></span>
-        </label>
-        <span id="advanced-label" class="advanced-label-text">Advanced</span>
-      </div>
-      <div class="thinking-toggle-wrap">
-        <label class="thinking-toggle-label" for="thinking-toggle" aria-label="Thinking mode">
-          <input type="checkbox" id="thinking-toggle" />
-          <span class="thinking-toggle-slider"></span>
-        </label>
-        <span id="thinking-label" class="thinking-label-text">Thinking</span>
-      </div>
       <div id="session-badge" class="session-badge hidden">
         <span class="session-dot"></span>
         <span id="session-label">Session Active</span>
+        <button id="kb-docs-btn" class="kb-docs-btn" onclick="toggleAttachedDocsPopover(event)" title="See which documents are attached">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        </button>
+        <button id="kb-detach-btn" class="kb-detach-btn hidden" onclick="detachKnowledgeBase()" title="Stop using this knowledge base">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+        <div class="attached-docs-popover hidden" id="attached-docs-popover">
+          <div class="attached-docs-title">Attached documents</div>
+          <div class="attached-docs-list" id="attached-docs-list"></div>
+        </div>
       </div>
       <!-- dark mode toggle injected by chat.js -->
     </div>
@@ -68,8 +64,45 @@
   <!-- Main layout -->
   <main class="layout">
 
-    <!-- Sidebar -->
+    <!-- Sidebar - a slim icon-only rail. Clicking an icon opens the wide
+         side-drawer (below) that overlays the chat area, instead of the
+         panel content being squeezed inline below the icons. -->
     <aside class="sidebar" id="sidebar">
+      <nav class="sidebar-nav">
+        <button class="sidebar-nav-btn" onclick="goToChatHome()" title="Back to chat">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11.5 12 4l9 7.5"/><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10"/></svg>
+          <span>Home</span>
+        </button>
+        <button class="sidebar-nav-btn" data-panel="upload" onclick="showSidebarPanel('upload')" title="Upload a document">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <span>Upload</span>
+        </button>
+        <button class="sidebar-nav-btn" data-panel="connectors" onclick="showSidebarPanel('connectors')" title="Connect a data source">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          <span>Connect</span>
+        </button>
+        <button class="sidebar-nav-btn" data-panel="knowledge" onclick="showSidebarPanel('knowledge')" title="Knowledge base">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          <span>Knowledge</span>
+        </button>
+        <button class="sidebar-nav-btn" data-panel="settings" onclick="showSidebarPanel('settings')" title="Settings">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>Settings</span>
+        </button>
+      </nav>
+    </aside>
+
+    <!-- Side drawer - the wide overlay panel that opens to the right of the
+         icon rail, covering the chat area, for whichever section is active. -->
+    <aside class="side-drawer hidden" id="side-drawer">
+      <div class="side-drawer-header">
+        <span id="side-drawer-title">Upload</span>
+        <button class="side-drawer-close" onclick="closeSidebarDrawer()" aria-label="Close panel">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+
+      <div class="side-drawer-body">
       <div id="upload-section">
         <div class="sidebar-title">Data Sources</div>
 
@@ -77,10 +110,6 @@
           <button class="tab active" data-tab="files">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
             Files
-          </button>
-          <button class="tab" data-tab="url">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-            URL
           </button>
           <button class="tab" data-tab="api">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
@@ -92,7 +121,7 @@
         <div class="tab-panel active" id="panel-files">
           <div class="limits-note">
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-            Up to 3 files · Max 15 MB · PDF, DOC, DOCX, TXT, MD, XLSX, XLS, CSV
+            Up to 3 files · Max 15 MB
           </div>
           <div class="drop-zone" id="drop-zone">
             <input type="file" id="file-input" multiple accept=".pdf,.doc,.docx,.txt,.md,.xlsx,.xls,.csv" hidden aria-label="Choose files to upload" />
@@ -134,8 +163,9 @@
         </div>
       </div>
 
-      <!-- CONNECTORS (source-system connectors) - swapped in for upload-section via toggleConnectorsView() -->
+      <!-- CONNECTORS (source-system connectors) - shown via showSidebarPanel('connectors') -->
       <div id="connectors-section" class="hidden">
+        <div class="sidebar-title">Connect a Source</div>
         <div class="limits-note">
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           Connect a source and pick a file to add to this chat
@@ -145,20 +175,54 @@
         </div>
       </div>
 
-      <button class="process-btn" id="process-btn" onclick="processSource()">
-        <span class="btn-text">Process &amp; Chat with ARIA</span>
-        <span class="btn-spinner hidden"></span>
-      </button>
+      <!-- KNOWLEDGE BASE (admin-curated, shared document sets) - shown via showSidebarPanel('knowledge') -->
+      <div id="knowledge-section" class="hidden">
+        <div class="sidebar-title">Knowledge Base</div>
+        <div class="limits-note">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          Switch which document set ARIA answers from
+        </div>
+        <div id="kb-list" class="kb-list"></div>
+      </div>
 
-      <button class="connectors-toggle-btn" id="connectors-toggle-btn" onclick="toggleConnectorsView()">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-        <span class="btn-text">Connect a Data Source</span>
-      </button>
+      <!-- SETTINGS (advanced / thinking mode) - shown via showSidebarPanel('settings') -->
+      <div id="settings-section" class="hidden">
+        <div class="sidebar-title">Settings</div>
+        <div class="settings-row">
+          <div>
+            <div class="settings-row-label">Advanced Mode</div>
+            <div class="settings-row-hint">Graph-aware retrieval for complex questions</div>
+          </div>
+          <label class="advanced-toggle-label" for="advanced-toggle" aria-label="Advanced mode">
+            <input type="checkbox" id="advanced-toggle" />
+            <span class="advanced-toggle-slider"></span>
+          </label>
+        </div>
+        <div class="settings-row">
+          <div>
+            <div class="settings-row-label">Thinking Mode</div>
+            <div class="settings-row-hint">Shows ARIA's reasoning before the answer</div>
+          </div>
+          <label class="thinking-toggle-label" for="thinking-toggle" aria-label="Thinking mode">
+            <input type="checkbox" id="thinking-toggle" />
+            <span class="thinking-toggle-slider"></span>
+          </label>
+        </div>
+      </div>
 
-      <button class="reset-btn hidden" id="reset-btn" onclick="resetSession()">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-5"/></svg>
-        New Session
-      </button>
+      </div><!-- /side-drawer-body -->
+
+      <div class="side-drawer-footer">
+        <button class="process-btn" id="process-btn" onclick="processSource()">
+          <span class="btn-text">Process &amp; Chat with ARIA</span>
+          <span class="btn-spinner hidden"></span>
+        </button>
+
+        <button class="reset-btn hidden" id="reset-btn" onclick="resetSession()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-5"/></svg>
+          New Session
+        </button>
+      </div>
     </aside>
 
     <!-- Chat -->
@@ -190,6 +254,34 @@
 
       <!-- Input bar -->
       <div class="input-bar">
+        <div class="composer-attach">
+          <button class="composer-plus-btn" id="composer-plus-btn" type="button" onclick="toggleComposerMenu(event)" aria-label="Add content" title="Add content">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          </button>
+          <div class="composer-menu hidden" id="composer-menu">
+            <button type="button" onclick="composerMenuAction('upload')">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              Upload a document
+            </button>
+            <button type="button" onclick="composerMenuAction('connectors')">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+              Connect a source
+            </button>
+            <button type="button" onclick="composerAddUrl()">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+              Add URL
+            </button>
+          </div>
+        </div>
+        <div class="composer-attach">
+          <button class="composer-plus-btn" id="composer-attachments-btn" type="button" onclick="toggleComposerAttachmentsPopover(event)" aria-label="View attached documents" title="View what's attached to this chat">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05 12.25 20.24a5.5 5.5 0 0 1-7.78-7.78l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95L9.41 16.52a1.5 1.5 0 0 1-2.12-2.12l8.49-8.49"/></svg>
+          </button>
+          <div class="attached-docs-popover attached-docs-popover--up hidden" id="composer-attachments-popover">
+            <div class="attached-docs-title">Attached to this chat</div>
+            <div class="attached-docs-list" id="composer-attachments-list"></div>
+          </div>
+        </div>
         <textarea
           id="chat-input"
           class="chat-input"

@@ -157,7 +157,12 @@ def verify_supabase_token(token: str) -> dict | None:
 # ── Universal token verifier ──────────────────────────────────────────────────
 
 def verify_token(token: str) -> dict | None:
-    """Try guest JWT first, then Supabase. Returns user dict or None."""
+    """Try admin JWT, then guest JWT, then Supabase. Returns user dict or None."""
+    from app.services import admin_auth
+    admin = admin_auth.verify_admin_token(token)
+    if admin:
+        return admin
+
     guest = verify_guest_token(token)
     if guest:
         return {

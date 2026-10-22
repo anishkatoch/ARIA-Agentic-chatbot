@@ -11,6 +11,22 @@ class MicrosoftGraphError(RuntimeError):
     """Raised when Microsoft Graph authentication or a request fails."""
 
 
+def _extract_graph_error_message(response: httpx.Response, max_len: int = 300) -> str:
+    """Best-effort human-readable detail from a Graph error response body
+    ({"error": {"code", "message"}}) - e.g. "Failed to get license
+    information for the user" instead of just "access denied", which points
+    at the real cause (no M365 license) instead of a permissions problem."""
+    try:
+        body = response.json()
+    except Exception:
+        return response.text.strip()[:max_len]
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict) and err.get("message"):
+            return str(err["message"])[:max_len]
+    return response.text.strip()[:max_len]
+
+
 class MicrosoftGraphClient:
     """Shared Microsoft Graph client for SharePoint and Teams."""
 
@@ -77,9 +93,13 @@ class MicrosoftGraphClient:
                 if response.status_code == 404:
                     raise MicrosoftGraphError(f"Resource not found: {endpoint}")
                 if response.status_code == 403:
-                    raise MicrosoftGraphError("Access denied or insufficient Microsoft Graph permissions")
+                    detail = _extract_graph_error_message(response)
+                    suffix = f": {detail}" if detail else ""
+                    raise MicrosoftGraphError(f"Access denied or insufficient Microsoft Graph permissions{suffix}")
                 if response.status_code == 401:
-                    raise MicrosoftGraphError("Microsoft Graph authentication failed")
+                    detail = _extract_graph_error_message(response)
+                    suffix = f" ({detail})" if detail else ""
+                    raise MicrosoftGraphError(f"Microsoft Graph authentication failed{suffix}")
                 if response.status_code == 429:
                     raise MicrosoftGraphError("Microsoft Graph API rate limit exceeded")
                 if response.is_error:
@@ -140,8 +160,10 @@ class MicrosoftGraphClient:
             with httpx.Client(timeout=60.0, follow_redirects=True) as client:
                 response = client.get(url, headers=headers)
                 if response.is_error:
+                    detail = _extract_graph_error_message(response)
+                    suffix = f": {detail}" if detail else ""
                     raise MicrosoftGraphError(
-                        f"Failed to download file from Microsoft Graph: HTTP {response.status_code}"
+                        f"Failed to download file from Microsoft Graph: HTTP {response.status_code}{suffix}"
                     )
                 return response.content
         except httpx.RequestError as exc:

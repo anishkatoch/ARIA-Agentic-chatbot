@@ -125,6 +125,8 @@
   <!-- ══════════════════ RIGHT PANEL ══════════════════ -->
   <div class="auth-right">
 
+    <a href="/admin.html" class="admin-link" title="Admin portal">Admin</a>
+
     <div class="auth-card">
 
       <!-- Typing greeting -->
@@ -231,6 +233,19 @@
             <span class="btn-spinner hidden"></span>
           </button>
         </form>
+
+        <div class="oauth-divider hidden" id="oauth-divider-signup"><span>or continue with</span></div>
+        <div class="oauth-buttons hidden" id="oauth-buttons-signup">
+          <button type="button" class="oauth-btn" id="btn-oauth-google-signup" onclick="handleOAuthSignin('google', 'oauth-error-signup')">
+            <svg width="16" height="16" viewBox="0 0 24 24"><path fill="#4285F4" d="M23.52 12.27c0-.85-.07-1.47-.22-2.12H12v3.85h6.56c-.13 1.09-.84 2.73-2.42 3.84l-.02.15 3.52 2.73.24.02c2.24-2.07 3.53-5.12 3.53-8.47z"/><path fill="#34A853" d="M12 24c3.24 0 5.95-1.07 7.94-2.91l-3.78-2.93c-1.01.71-2.37 1.2-4.16 1.2-3.18 0-5.88-2.1-6.84-5.01l-.14.01-3.68 2.85-.05.14C3.26 21.3 7.3 24 12 24z"/><path fill="#FBBC05" d="M5.16 14.35A7.2 7.2 0 0 1 4.77 12c0-.82.14-1.61.38-2.35l-.01-.15-3.72-2.89-.12.06A11.98 11.98 0 0 0 0 12c0 1.93.46 3.76 1.3 5.33l3.86-3z"/><path fill="#EA4335" d="M12 4.75c2.26 0 3.78.97 4.65 1.79l3.39-3.31C17.94 1.19 15.24 0 12 0 7.3 0 3.26 2.7 1.3 6.67l3.85 3C6.12 6.85 8.82 4.75 12 4.75z"/></svg>
+            Sign up with Google
+          </button>
+          <button type="button" class="oauth-btn" id="btn-oauth-microsoft-signup" onclick="handleOAuthSignin('azure', 'oauth-error-signup')">
+            <svg width="16" height="16" viewBox="0 0 24 24"><rect x="1" y="1" width="10" height="10" fill="#F25022"/><rect x="13" y="1" width="10" height="10" fill="#7FBA00"/><rect x="1" y="13" width="10" height="10" fill="#00A4EF"/><rect x="13" y="13" width="10" height="10" fill="#FFB900"/></svg>
+            Sign up with Microsoft
+          </button>
+        </div>
+        <div id="oauth-error-signup" class="form-error hidden"></div>
       </div>
 
       <!-- ── Guest ── -->

@@ -3,7 +3,7 @@
 Being logged into the app (the normal Bearer JWT) is not enough to reach any
 connector - the user must also know a shared CONNECTORS_ACCESS_KEY, set once
 by whoever runs this deployment and stored only in .env. This matters because
-a connected Gmail/GitHub/Jira/Salesforce session gives this app real access to
+a connected Gmail/GitHub session gives this app real access to
 someone's real third-party accounts, which is more sensitive than ordinary
 chat data.
 

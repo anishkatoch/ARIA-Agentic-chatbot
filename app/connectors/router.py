@@ -3,28 +3,28 @@
 Three routers are exported:
 
 - `router` (prefix="/connectors") - all data/listing endpoints, login-initiation
-  endpoints for the 3 OAuth-based connectors, and the ingest bridge endpoint.
+  endpoints for the OAuth-based connectors, and the ingest bridge endpoint.
   This whole prefix is gated behind the existing auth middleware (see
   app/main.py's _PROTECTED_PREFIXES), so every route here requires a logged-in
   user - same as /chat/ and /upload/. On top of that, every route on this
   router also requires a valid connectors-unlock token (see access_gate.py
   and the `require_connectors_unlock` dependency below) - a second, separate
   secret the deployment owner sets in CONNECTORS_ACCESS_KEY, since a connected
-  Gmail/GitHub/Jira/Salesforce session is real access to someone's real
-  third-party accounts, not just app data.
+  Gmail/GitHub session is real access to someone's real third-party accounts,
+  not just app data.
 
 - `unlock_router` (prefix="/connectors") - just the one POST /connectors/unlock
   endpoint used to exchange the raw access key for a short-lived unlock token.
   Deliberately NOT behind `require_connectors_unlock` itself (a lock can't
   require its own key to ask about opening it).
 
-- `oauth_callback_router` (no prefix) - the 3 OAuth callback endpoints, which
+- `oauth_callback_router` (no prefix) - the OAuth callback endpoints, which
   MUST live at a literal fixed path matching GOOGLE_REDIRECT_URI /
-  GOOGLE_DRIVE_REDIRECT_URI / SALESFORCE_REDIRECT_URI (the browser lands on
-  these directly from Google/Salesforce with no Authorization header, so they
-  can't be gated behind either Bearer auth or the unlock token - they must
-  stay in app/main.py's _PUBLIC_PREFIXES). Reaching this point already
-  required completing the gated /auth/login step first, so this stays safe.
+  GOOGLE_DRIVE_REDIRECT_URI (the browser lands on these directly from Google
+  with no Authorization header, so they can't be gated behind either Bearer
+  auth or the unlock token - they must stay in app/main.py's
+  _PUBLIC_PREFIXES). Reaching this point already required completing the
+  gated /auth/login step first, so this stays safe.
 
 This module (and everything else in app/connectors/ except pipeline_bridge.py)
 has no knowledge of this host app's RAG internals - the one place that
@@ -32,29 +32,33 @@ knowledge lives is app.connectors.pipeline_bridge.ingest_bytes(), which this
 router calls after fetching connector-sourced bytes. See
 app/connectors/README.md for the full picture of how this package is bounded.
 """
+import asyncio
 import logging
 import os
+import time
 import uuid
 from io import BytesIO
+from typing import AsyncGenerator
 from urllib.parse import quote
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
+from pydantic import BaseModel
 
+from app.config import cfg
 from app.connectors import access_gate, token_store, credential_store
-from app.connectors.clients.file_share import get_connector as get_file_share_connector
-from app.connectors.clients.lms import get_lms_connector
-from app.connectors.clients.github import get_github_connector
+from app.connectors.clients.github import GitHubConnector, get_github_connector
 from app.connectors.clients.gmail import get_gmail_connector
 from app.connectors.clients.google_drive import get_google_drive_connector
-from app.connectors.clients.salesforce import get_salesforce_connector
-from app.connectors.clients.servicenow import get_servicenow_connector
-from app.connectors.clients.jira import get_jira_connector
+from app.connectors.clients.google_chat import get_google_chat_connector
+from app.connectors.clients.outlook import get_outlook_connector
+from app.connectors.clients.outlook_chat import get_outlook_chat_connector
 from app.connectors.clients.microsoft_graph import MicrosoftGraphError
 from app.connectors.clients.sharepoint import SharePointConnector
 from app.connectors.clients.teams import TeamsConnector
 from app.connectors.clients.azure_devops import get_azure_devops_connector, AzureDevOpsConnector, AzureDevOpsError
 from app.connectors import pipeline_bridge
+from app.routers.upload import sse, SSE_HEADERS
 
 logger = logging.getLogger(__name__)
 
@@ -153,17 +157,15 @@ def unlock_connectors(request: Request, body: dict = Body(...)):
 # id: matches /{provider}/ingest and token_store provider keys (underscores).
 # path: matches this router's URL segments (hyphens where the route uses them).
 CONNECTOR_CATALOG = [
-    {"id": "file_share",   "path": "file-share",   "name": "File Share",        "type": "files",              "auth": "config"},
-    {"id": "lms",          "path": "lms",           "name": "LMS",               "type": "learning",           "auth": "none"},
     {"id": "github",       "path": "github",        "name": "GitHub",            "type": "code",               "auth": "byok"},
     {"id": "gmail",        "path": "gmail",         "name": "Gmail",             "type": "email",              "auth": "oauth"},
     {"id": "google_drive", "path": "google-drive",  "name": "Google Drive",      "type": "documents",          "auth": "oauth"},
+    {"id": "google_chat",  "path": "google-chat",   "name": "Google Chat",       "type": "chat",               "auth": "oauth"},
+    {"id": "outlook",      "path": "outlook",       "name": "Outlook",           "type": "email",              "auth": "oauth"},
+    {"id": "outlook_chat", "path": "outlook-chat",  "name": "Outlook Chat",      "type": "chat",               "auth": "oauth"},
     {"id": "sharepoint",   "path": "sharepoint",    "name": "SharePoint",        "type": "documents",          "auth": "config"},
     {"id": "teams",        "path": "teams",         "name": "Microsoft Teams",   "type": "chat",               "auth": "config"},
     {"id": "azure_devops", "path": "azure-devops",  "name": "Azure DevOps Repos","type": "code",               "auth": "byok"},
-    {"id": "jira",         "path": "jira",          "name": "Jira",              "type": "project_management", "auth": "byok"},
-    {"id": "servicenow",   "path": "servicenow",    "name": "ServiceNow",        "type": "itsm",               "auth": "byok"},
-    {"id": "salesforce",   "path": "salesforce",    "name": "Salesforce",        "type": "crm",                "auth": "oauth"},
 ]
 
 # auth="byok" ("bring your own key") connectors: a user can enter their own
@@ -175,16 +177,6 @@ CONNECTOR_CATALOG = [
 BYOK_CREDENTIAL_FIELDS = {
     "github": [
         {"key": "token", "label": "Personal Access Token", "type": "password"},
-    ],
-    "jira": [
-        {"key": "base_url", "label": "Jira Base URL", "type": "text", "placeholder": "https://your-domain.atlassian.net"},
-        {"key": "email", "label": "Email", "type": "text"},
-        {"key": "api_token", "label": "API Token", "type": "password"},
-    ],
-    "servicenow": [
-        {"key": "instance_url", "label": "Instance URL", "type": "text", "placeholder": "https://your-instance.service-now.com"},
-        {"key": "username", "label": "Username", "type": "text"},
-        {"key": "password", "label": "Password", "type": "password"},
     ],
     "azure_devops": [
         {"key": "org_url", "label": "Organization URL", "type": "text", "placeholder": "https://dev.azure.com/your-org"},
@@ -201,15 +193,10 @@ def _is_placeholder(*values: str) -> bool:
 
 
 def _is_configured(provider_id: str) -> bool:
-    if provider_id == "file_share":
-        root = os.getenv("FILE_SHARE_ROOT", "")
-        return bool(root) and not _is_placeholder(root) and os.path.isdir(root)
-    if provider_id == "lms":
-        return True  # mock connector, no config needed
     if provider_id == "github":
         token = os.getenv("GITHUB_TOKEN", "")
         return bool(token) and not _is_placeholder(token)
-    if provider_id in ("gmail", "google_drive"):
+    if provider_id in ("gmail", "google_drive", "google_chat"):
         vals = (os.getenv("GOOGLE_CLIENT_ID", ""), os.getenv("GOOGLE_CLIENT_SECRET", ""))
         return all(vals) and not _is_placeholder(*vals)
     if provider_id in ("sharepoint", "teams"):
@@ -219,21 +206,14 @@ def _is_configured(provider_id: str) -> bool:
             os.getenv("MICROSOFT_CLIENT_SECRET", ""),
         )
         return all(vals) and not _is_placeholder(*vals)
+    if provider_id in ("outlook", "outlook_chat"):
+        # Delegated user OAuth via the "common" authority - unlike
+        # sharepoint/teams' app-only flow, this doesn't require a specific
+        # MICROSOFT_TENANT_ID to be set.
+        vals = (os.getenv("MICROSOFT_CLIENT_ID", ""), os.getenv("MICROSOFT_CLIENT_SECRET", ""))
+        return all(vals) and not _is_placeholder(*vals)
     if provider_id == "azure_devops":
         vals = (os.getenv("AZURE_DEVOPS_ORG_URL", ""), os.getenv("AZURE_DEVOPS_PAT", ""))
-        return all(vals) and not _is_placeholder(*vals)
-    if provider_id == "jira":
-        vals = (os.getenv("JIRA_BASE_URL", ""), os.getenv("JIRA_EMAIL", ""), os.getenv("JIRA_API_TOKEN", ""))
-        return all(vals) and not _is_placeholder(*vals)
-    if provider_id == "servicenow":
-        vals = (
-            os.getenv("SERVICENOW_INSTANCE_URL", ""),
-            os.getenv("SERVICENOW_USERNAME", ""),
-            os.getenv("SERVICENOW_PASSWORD", ""),
-        )
-        return all(vals) and not _is_placeholder(*vals)
-    if provider_id == "salesforce":
-        vals = (os.getenv("SALESFORCE_CLIENT_ID", ""), os.getenv("SALESFORCE_CLIENT_SECRET", ""))
         return all(vals) and not _is_placeholder(*vals)
     return False
 
@@ -269,28 +249,43 @@ def _delete_token_and_credentials(user_id: str, provider: str) -> None:
         db.close()
 
 
+# Gmail+Google Chat (one Google OAuth grant) and Outlook+Outlook Chat (one
+# Microsoft OAuth grant) each share a single underlying token - see
+# gmail.py/outlook.py's SCOPES and gmail_callback/outlook_callback's
+# token-mirroring below. From the user's perspective, each pair is always
+# connected/disconnected together, so disconnecting either half of a pair
+# must delete both its token rows, not just the one the user clicked.
+_LINKED_OAUTH_PROVIDERS = {
+    "gmail": ("gmail", "google_chat"),
+    "google_chat": ("gmail", "google_chat"),
+    "outlook": ("outlook", "outlook_chat"),
+    "outlook_chat": ("outlook", "outlook_chat"),
+}
+
+
 @router.post("/{provider}/disconnect")
 def disconnect_connector(provider: str, request: Request):
-    """Removes this user's stored OAuth token (Gmail/Google Drive/Salesforce)
-    and/or their own API-key credentials (GitHub/Jira/ServiceNow/Azure DevOps)
+    """Removes this user's stored OAuth token (Gmail/Google Drive/Google Chat/
+    Outlook/Outlook Chat)
+    and/or their own API-key credentials (GitHub/Azure DevOps)
     for `provider` - whichever applies, the other is a harmless no-op. /status
     then shows it as not-connected (oauth) or falls back to the shared env var
     default if one is configured (byok). A fresh /{provider}/auth/login for an
     oauth provider can link a different account (each client requests the
     provider's account-chooser / re-login prompt, not a silent same-account
-    reauth - see get_authorization_url in gmail.py, google_drive.py, and
-    salesforce.py)."""
+    reauth - see get_authorization_url in gmail.py and google_drive.py)."""
     provider = _normalize_provider(provider)
     user_id = _user_id(request)
-    _delete_token_and_credentials(user_id, provider)
+    for linked in _LINKED_OAUTH_PROVIDERS.get(provider, (provider,)):
+        _delete_token_and_credentials(user_id, linked)
     return {"disconnected": True, "provider": provider}
 
 
 @router.post("/{provider}/credentials")
 def save_connector_credentials(provider: str, request: Request, body: dict = Body(...)):
     """Lets this user "bring their own key" for a byok connector (GitHub,
-    Jira, ServiceNow, Azure DevOps), overriding the shared app-level env var
-    default for their own requests only - every other user is unaffected."""
+    Azure DevOps), overriding the shared app-level env var default for their
+    own requests only - every other user is unaffected."""
     provider = _normalize_provider(provider)
     if provider not in BYOK_CREDENTIAL_FIELDS:
         raise HTTPException(400, f"'{provider}' does not support per-user credentials.")
@@ -300,6 +295,26 @@ def save_connector_credentials(provider: str, request: Request, body: dict = Bod
     if missing:
         raise HTTPException(400, f"Missing required field(s): {', '.join(missing)}")
     creds = {f["key"]: str(body[f["key"]]).strip() for f in fields}
+
+    # Validates the credentials actually work against the real API before
+    # persisting them - previously this only checked the fields were
+    # non-empty, so e.g. a non-URL typed into Azure DevOps' "Organization
+    # URL" field, or a password typed into the PAT field by mistake, would
+    # save "successfully", the row would show "Connected", and the actual
+    # rejection would only surface later as a confusing error the first time
+    # the connector was used (this has happened twice with different bad
+    # values in the same field - format-only validation wasn't enough).
+    if provider == "azure_devops":
+        try:
+            AzureDevOpsConnector(org_url=creds["org_url"], pat=creds["pat"]).list_projects()
+        except AzureDevOpsError as exc:
+            raise HTTPException(400, str(exc))
+    elif provider == "github":
+        try:
+            GitHubConnector(token=creds["token"])._request("/user")
+        except HTTPException as exc:
+            raise HTTPException(400, f"Couldn't verify this GitHub token: {exc.detail}")
+
     user_id = _user_id(request)
     if not credential_store.save_credentials(user_id, provider, creds):
         raise HTTPException(503, "Could not save credentials - database unavailable.")
@@ -353,62 +368,6 @@ def connectors_status(request: Request):
 
 
 # ==========================================
-# File Share Connector Endpoints
-# ==========================================
-@router.get("/file-share/files")
-def list_files(
-    path: str = Query(default="", description="Relative path inside configured root"),
-):
-    connector = get_file_share_connector()
-    return connector.list_directory(path)
-
-
-@router.get("/file-share/download")
-def download_file(
-    path: str = Query(..., description="Relative file path inside configured root")
-):
-    connector = get_file_share_connector()
-    file_path = connector.get_file(path)
-    return FileResponse(
-        path=str(file_path),
-        filename=file_path.name,
-        media_type="application/octet-stream",
-    )
-
-
-# ==========================================
-# LMS Connector Endpoints (Mock / Modular)
-# ==========================================
-@router.get("/lms/courses")
-def lms_list_courses():
-    connector = get_lms_connector()
-    return connector.list_courses()
-
-
-@router.get("/lms/courses/{course_id}/modules")
-def lms_list_modules(course_id: str):
-    connector = get_lms_connector()
-    return connector.list_modules(course_id)
-
-
-@router.get("/lms/courses/{course_id}/files")
-def lms_list_course_files(course_id: str):
-    connector = get_lms_connector()
-    return connector.list_course_files(course_id)
-
-
-@router.get("/lms/files/{file_id}/download")
-def lms_download_file(file_id: str):
-    connector = get_lms_connector()
-    file_path = connector.get_file(file_id)
-    return FileResponse(
-        path=str(file_path),
-        filename=file_path.name,
-        media_type="application/octet-stream",
-    )
-
-
-# ==========================================
 # GitHub Connector Endpoints
 # ==========================================
 @router.get("/github/repos")
@@ -454,6 +413,29 @@ def download_github_file(
 # ==========================================
 # Gmail Connector Endpoints (Google OAuth2 + Gmail API)
 # ==========================================
+
+# Gmail's standard category tabs, mapped to the labelIds the API expects.
+# "all" omits labelIds entirely - Gmail's default list (no labelIds, no q)
+# already excludes only SPAM/TRASH, same as the "All Mail" view.
+GMAIL_CATEGORY_LABELS: dict[str, list[str] | None] = {
+    "inbox":      ["INBOX"],
+    "spam":       ["SPAM"],
+    "promotions": ["CATEGORY_PROMOTIONS"],
+    "social":     ["CATEGORY_SOCIAL"],
+    "updates":    ["CATEGORY_UPDATES"],
+    "forums":     ["CATEGORY_FORUMS"],
+    "sent":       ["SENT"],
+    "all":        None,
+}
+
+
+def _gmail_label_ids(label: str) -> list[str] | None:
+    label = (label or "all").lower()
+    if label not in GMAIL_CATEGORY_LABELS:
+        raise HTTPException(400, f"Unknown label '{label}'. Allowed: {', '.join(GMAIL_CATEGORY_LABELS)}")
+    return GMAIL_CATEGORY_LABELS[label]
+
+
 @router.get("/gmail/auth/login")
 def gmail_login(request: Request):
     # Returns the auth URL as JSON rather than a redirect - this endpoint is
@@ -471,15 +453,25 @@ def gmail_status(request: Request):
     return connector.get_status()
 
 
+@router.get("/gmail/labels")
+def gmail_list_labels():
+    """The fixed set of category tabs the frontend renders (Inbox, Spam,
+    Promotions, Social, Updates, Forums, Sent, All) - these map to Gmail's
+    own system/category labelIds, not a live call to the Gmail API."""
+    return {"labels": list(GMAIL_CATEGORY_LABELS.keys())}
+
+
 @router.get("/gmail/messages")
 def gmail_list_messages(
     request: Request,
     max_results: int = Query(default=10, ge=1, le=50),
     q: str = Query(default="", description="Search query e.g. from:someone or has:attachment"),
     page_token: str = Query(default="", description="next_page_token from a previous page to continue listing"),
+    label: str = Query(default="all", description="One of: " + ", ".join(GMAIL_CATEGORY_LABELS)),
 ):
     connector = get_gmail_connector(_user_id(request))
-    return connector.list_messages(max_results=max_results, q=q, page_token=page_token)
+    label_ids = _gmail_label_ids(label)
+    return connector.list_messages(max_results=max_results, q=q, page_token=page_token, label_ids=label_ids)
 
 
 @router.get("/gmail/messages/{message_id}")
@@ -504,6 +496,92 @@ def gmail_download_attachment(
     )
 
 
+class GmailBulkIngestRequest(BaseModel):
+    # "selected": ingest exactly `message_ids`.
+    # "count": ingest the `count` most recent messages matching `label` (Gmail
+    #          lists newest-first, so this is naturally "latest N").
+    # "all": ingest every message matching `label`, up to cfg.gmail_bulk_ingest_limit.
+    mode: str
+    label: str = "all"
+    message_ids: list[str] | None = None
+    count: int | None = None
+    session_id: str | None = None
+
+
+@router.post("/gmail/ingest/bulk")
+async def gmail_ingest_bulk(request: Request, body: GmailBulkIngestRequest):
+    """Ingests many Gmail messages in one call, streaming SSE progress
+    events (reusing the same event shape the file-upload SSE stream emits -
+    see app.routers.upload.upload_files - so the frontend's existing
+    ProgressCard/handleProgressEvent can render it unchanged). Each message
+    goes through pipeline_bridge.ingest_gmail_message exactly as the
+    single-email ingest path does (body + every attachment's extracted
+    text), so dedup/chunk/embed behavior is identical - this just loops."""
+    user_id = _user_id(request)
+    client_token = f"connector:{user_id}"
+    connector = get_gmail_connector(user_id)
+    label_ids = _gmail_label_ids(body.label)
+
+    if body.mode == "selected":
+        if not body.message_ids:
+            raise HTTPException(400, "message_ids is required for mode='selected'")
+        message_ids = body.message_ids[:cfg.gmail_bulk_ingest_limit]
+    elif body.mode == "count":
+        if not body.count or body.count < 1:
+            raise HTTPException(400, "count is required (>=1) for mode='count'")
+        limit = min(body.count, cfg.gmail_bulk_ingest_limit)
+        message_ids = connector.list_message_ids(label_ids=label_ids, limit=limit)
+    elif body.mode == "all":
+        message_ids = connector.list_message_ids(label_ids=label_ids, limit=cfg.gmail_bulk_ingest_limit)
+    else:
+        raise HTTPException(400, "mode must be one of: selected, count, all")
+
+    async def stream() -> AsyncGenerator[str, None]:
+        t0 = time.time()
+        session_id = body.session_id
+        total = len(message_ids)
+        ingested = 0
+
+        if total == 0:
+            yield sse({"type": "complete", "session_id": session_id, "total_elapsed": 0.0,
+                       "completion_message": "No matching emails found"})
+            return
+
+        if body.mode == "all" and total >= cfg.gmail_bulk_ingest_limit:
+            yield sse({"type": "warning",
+                       "message": f"Capped at {cfg.gmail_bulk_ingest_limit} most recent emails for this bulk ingest."})
+            await asyncio.sleep(0)
+
+        for i, message_id in enumerate(message_ids):
+            stage = f"gmail_{i}"
+            yield sse({"type": "step", "status": "start", "stage": stage,
+                       "title": f"Ingesting emails ({i + 1}/{total})",
+                       "message": f"Fetching email {i + 1} of {total}..."})
+            await asyncio.sleep(0)
+            t1 = time.time()
+            try:
+                result = await pipeline_bridge.ingest_gmail_message(
+                    message_id=message_id, user_id=user_id, client_token=client_token, session_id=session_id,
+                )
+                session_id = result["session_id"]
+                ingested += 1
+                yield sse({"type": "step", "status": "done", "stage": stage,
+                           "message": result["filename"], "elapsed": round(time.time() - t1, 2)})
+            except Exception as e:
+                logger.warning(f"[CONNECTORS][GMAIL][BULK] message {message_id} failed: {e}")
+                yield sse({"type": "step", "status": "error", "stage": stage,
+                           "message": f"Email {i + 1} failed: {e}"})
+            await asyncio.sleep(0)
+
+        yield sse({
+            "type": "complete", "session_id": session_id,
+            "total_elapsed": round(time.time() - t0, 2),
+            "completion_message": f"Ingested {ingested}/{total} emails - ready to chat!",
+        })
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
 @oauth_callback_router.get("/gmail/callback")
 def gmail_callback(code: str = Query(...), state: str = Query(default="")):
     # Redirects back into the app instead of leaving the browser on a bare
@@ -515,7 +593,144 @@ def gmail_callback(code: str = Query(...), state: str = Query(default="")):
         raise HTTPException(400, "Missing state (user id) on Gmail OAuth callback")
     connector = get_gmail_connector(user_id)
     connector.exchange_code_for_token(code)
+
+    # Google Chat shares this exact OAuth grant (gmail.py's SCOPES already
+    # request the Chat read scopes) - mirror the token into a second
+    # "google_chat" row so connecting Gmail connects Chat too, with no
+    # separate consent step or callback.
+    gmail_token = token_store.get_token(user_id, "gmail")
+    if gmail_token:
+        token_store.save_token(
+            user_id, "google_chat",
+            access_token=gmail_token["access_token"],
+            refresh_token=gmail_token["refresh_token"],
+            expires_at=gmail_token["expires_at"],
+        )
+
     return RedirectResponse(url="/?connected=gmail")
+
+
+# ==========================================
+# Google Chat Connector Endpoints (shares Gmail's OAuth grant - no auth/login
+# or callback of its own; see gmail_callback above and get_authorization_url
+# in gmail.py)
+# ==========================================
+GOOGLE_CHAT_SPACE_TYPES = ("all", "space", "group_chat", "direct_message")
+
+
+@router.get("/google-chat/auth/login")
+def google_chat_login(request: Request):
+    # Returns the exact same authorization URL Gmail's login does - one
+    # consent screen grants both, and gmail_callback mirrors the resulting
+    # token into the "google_chat" row too.
+    connector = get_gmail_connector(_user_id(request))
+    auth_url = connector.get_authorization_url()
+    return {"auth_url": auth_url}
+
+
+@router.get("/google-chat/status")
+def google_chat_status(request: Request):
+    connector = get_google_chat_connector(_user_id(request))
+    return connector.get_status()
+
+
+@router.get("/google-chat/spaces")
+def google_chat_list_spaces(
+    request: Request,
+    space_type: str = Query(default="all", description="One of: " + ", ".join(GOOGLE_CHAT_SPACE_TYPES)),
+    page_size: int = Query(default=50, ge=1, le=100),
+    page_token: str = Query(default=""),
+):
+    if space_type not in GOOGLE_CHAT_SPACE_TYPES:
+        raise HTTPException(400, f"Unknown space_type '{space_type}'. Allowed: {', '.join(GOOGLE_CHAT_SPACE_TYPES)}")
+    connector = get_google_chat_connector(_user_id(request))
+    return connector.list_spaces(space_type=space_type, page_size=page_size, page_token=page_token)
+
+
+@router.get("/google-chat/spaces/{space_id}/messages")
+def google_chat_list_messages(space_id: str, request: Request, page_token: str = Query(default="")):
+    connector = get_google_chat_connector(_user_id(request))
+    return connector.list_messages(space_id, page_token=page_token)
+
+
+class GoogleChatBulkIngestRequest(BaseModel):
+    # "selected": ingest exactly `space_ids`.
+    # "all": ingest every space matching `space_type`, up to cfg.gmail_bulk_ingest_limit.
+    mode: str
+    space_type: str = "all"
+    space_ids: list[str] | None = None
+    session_id: str | None = None
+
+
+@router.post("/google-chat/ingest/bulk")
+async def google_chat_ingest_bulk(request: Request, body: GoogleChatBulkIngestRequest):
+    """Ingests many Google Chat spaces/chats in one call, streaming SSE
+    progress events in the same shape the Gmail bulk endpoint and the
+    file-upload SSE stream use (see app.routers.upload.upload_files), so the
+    frontend's existing ProgressCard/handleProgressEvent renders it
+    unchanged. Each space goes through pipeline_bridge.ingest_google_chat_space
+    (every message + attachment + linked page in that space, combined into
+    one document) exactly as a single-space ingest would - this just loops."""
+    user_id = _user_id(request)
+    client_token = f"connector:{user_id}"
+    connector = get_google_chat_connector(user_id)
+
+    if body.space_type not in GOOGLE_CHAT_SPACE_TYPES:
+        raise HTTPException(400, f"Unknown space_type '{body.space_type}'. Allowed: {', '.join(GOOGLE_CHAT_SPACE_TYPES)}")
+
+    if body.mode == "selected":
+        if not body.space_ids:
+            raise HTTPException(400, "space_ids is required for mode='selected'")
+        space_ids = body.space_ids[:cfg.gmail_bulk_ingest_limit]
+    elif body.mode == "all":
+        space_ids = connector.list_space_ids(space_type=body.space_type, limit=cfg.gmail_bulk_ingest_limit)
+    else:
+        raise HTTPException(400, "mode must be one of: selected, all")
+
+    async def stream() -> AsyncGenerator[str, None]:
+        t0 = time.time()
+        session_id = body.session_id
+        total = len(space_ids)
+        ingested = 0
+
+        if total == 0:
+            yield sse({"type": "complete", "session_id": session_id, "total_elapsed": 0.0,
+                       "completion_message": "No matching chats/spaces found"})
+            return
+
+        if body.mode == "all" and total >= cfg.gmail_bulk_ingest_limit:
+            yield sse({"type": "warning",
+                       "message": f"Capped at {cfg.gmail_bulk_ingest_limit} most recent chats/spaces for this bulk ingest."})
+            await asyncio.sleep(0)
+
+        for i, space_id in enumerate(space_ids):
+            stage = f"gchat_{i}"
+            yield sse({"type": "step", "status": "start", "stage": stage,
+                       "title": f"Ingesting chats/spaces ({i + 1}/{total})",
+                       "message": f"Fetching chat {i + 1} of {total}..."})
+            await asyncio.sleep(0)
+            t1 = time.time()
+            try:
+                result = await pipeline_bridge.ingest_google_chat_space(
+                    space_id=space_id, user_id=user_id, client_token=client_token, session_id=session_id,
+                )
+                session_id = result["session_id"]
+                ingested += 1
+                yield sse({"type": "step", "status": "done", "stage": stage,
+                           "message": result["filename"], "elapsed": round(time.time() - t1, 2)})
+            except Exception as e:
+                logger.warning(f"[CONNECTORS][GOOGLE_CHAT][BULK] space {space_id} failed: {e}")
+                yield sse({"type": "step", "status": "error", "stage": stage,
+                           "message": f"Chat {i + 1} failed: {e}"})
+            await asyncio.sleep(0)
+
+        yield sse({
+            "type": "complete", "session_id": session_id,
+            "total_elapsed": round(time.time() - t0, 2),
+            "completion_message": f"Ingested {ingested}/{total} chats/spaces - ready to chat!",
+        })
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers=SSE_HEADERS)
 
 
 # ==========================================
@@ -573,144 +788,273 @@ def google_drive_callback(code: str = Query(...), state: str = Query(default="")
 
 
 # ==========================================
-# ServiceNow Connector Endpoints
+# Outlook Mail Connector Endpoints
 # ==========================================
-@router.get("/servicenow/status")
-def servicenow_status(request: Request):
-    connector = get_servicenow_connector(_user_id(request))
-    return connector.get_status()
+OUTLOOK_FOLDERS = ("inbox", "junk", "sent", "drafts", "deleted", "all")
 
 
-@router.get("/servicenow/incidents")
-def servicenow_list_incidents(
-    request: Request,
-    max_results: int = Query(default=10, ge=1, le=100),
-    query: str = Query(default="", description="ServiceNow query string or filter"),
-):
-    connector = get_servicenow_connector(_user_id(request))
-    return connector.list_incidents(max_results=max_results, query=query)
-
-
-@router.get("/servicenow/incidents/{sys_id}")
-def servicenow_get_incident(sys_id: str, request: Request):
-    connector = get_servicenow_connector(_user_id(request))
-    return connector.get_incident(sys_id)
-
-
-@router.get("/servicenow/requests")
-def servicenow_list_requests(
-    request: Request,
-    max_results: int = Query(default=10, ge=1, le=100),
-    query: str = Query(default="", description="ServiceNow query string or filter"),
-):
-    connector = get_servicenow_connector(_user_id(request))
-    return connector.list_requests(max_results=max_results, query=query)
-
-
-@router.get("/servicenow/knowledge")
-def servicenow_search_knowledge(
-    request: Request,
-    query: str = Query(default="", description="Search query for knowledge articles"),
-    max_results: int = Query(default=10, ge=1, le=100),
-):
-    connector = get_servicenow_connector(_user_id(request))
-    return connector.search_knowledge(query=query, max_results=max_results)
-
-
-# ==========================================
-# Jira Connector Endpoints
-# ==========================================
-@router.get("/jira/status")
-def jira_status(request: Request):
-    connector = get_jira_connector(_user_id(request))
-    return connector.get_status()
-
-
-@router.get("/jira/issues")
-def jira_search_issues(
-    request: Request,
-    jql: str = Query(default="", description="JQL query to search issues"),
-    max_results: int = Query(default=10, ge=1, le=50),
-):
-    connector = get_jira_connector(_user_id(request))
-    return connector.search_issues(jql=jql, max_results=max_results)
-
-
-@router.get("/jira/issues/{issue_key}")
-def jira_get_issue(issue_key: str, request: Request):
-    connector = get_jira_connector(_user_id(request))
-    return connector.get_issue(issue_key)
-
-
-@router.get("/jira/projects")
-def jira_list_projects(request: Request):
-    connector = get_jira_connector(_user_id(request))
-    return connector.list_projects()
-
-
-# ==========================================
-# Salesforce Connector Endpoints
-# ==========================================
-@router.get("/salesforce/auth/login")
-def salesforce_login(request: Request):
-    connector = get_salesforce_connector(_user_id(request))
+@router.get("/outlook/auth/login")
+def outlook_login(request: Request):
+    connector = get_outlook_connector(_user_id(request))
     auth_url = connector.get_authorization_url()
     return {"auth_url": auth_url}
 
 
-@router.get("/salesforce/status")
-def salesforce_status(request: Request):
-    try:
-        connector = get_salesforce_connector(_user_id(request))
-        return connector.get_status()
-    except HTTPException as exc:
-        return {"authenticated": False, "detail": exc.detail}
+@router.get("/outlook/status")
+def outlook_status(request: Request):
+    connector = get_outlook_connector(_user_id(request))
+    return connector.get_status()
 
 
-@router.get("/salesforce/accounts")
-def salesforce_list_accounts(
+@router.get("/outlook/messages")
+def outlook_list_messages(
     request: Request,
-    max_results: int = Query(default=10, ge=1, le=100),
-    search: str = Query(default=""),
+    folder: str = Query(default="inbox", description="One of: " + ", ".join(OUTLOOK_FOLDERS)),
+    max_results: int = Query(default=25, ge=1, le=50),
+    next_link: str = Query(default="", description="@odata.nextLink from a previous page to continue listing"),
 ):
-    connector = get_salesforce_connector(_user_id(request))
-    return connector.list_accounts(max_results=max_results, search_term=search)
+    if folder not in OUTLOOK_FOLDERS:
+        raise HTTPException(400, f"Unknown folder '{folder}'. Allowed: {', '.join(OUTLOOK_FOLDERS)}")
+    connector = get_outlook_connector(_user_id(request))
+    return connector.list_messages(folder=folder, max_results=max_results, next_link=next_link)
 
 
-@router.get("/salesforce/leads")
-def salesforce_list_leads(
+@router.get("/outlook/messages/{message_id}")
+def outlook_get_message(message_id: str, request: Request):
+    connector = get_outlook_connector(_user_id(request))
+    return connector.get_message(message_id)
+
+
+@router.get("/outlook/messages/{message_id}/attachments/{attachment_id}")
+def outlook_download_attachment(
+    message_id: str,
+    attachment_id: str,
     request: Request,
-    max_results: int = Query(default=10, ge=1, le=100),
-    search: str = Query(default=""),
+    filename: str = Query(default="attachment"),
 ):
-    connector = get_salesforce_connector(_user_id(request))
-    return connector.list_leads(max_results=max_results, search_term=search)
+    connector = get_outlook_connector(_user_id(request))
+    content, attachment_filename = connector.download_attachment(message_id, attachment_id, filename)
+    return Response(
+        content=content,
+        media_type="application/octet-stream",
+        headers=_content_disposition_header(attachment_filename),
+    )
 
 
-@router.get("/salesforce/opportunities")
-def salesforce_list_opportunities(
-    request: Request,
-    max_results: int = Query(default=10, ge=1, le=100),
-    search: str = Query(default=""),
-):
-    connector = get_salesforce_connector(_user_id(request))
-    return connector.list_opportunities(max_results=max_results, search_term=search)
+class OutlookBulkIngestRequest(BaseModel):
+    # "selected": ingest exactly `message_ids`.
+    # "count": ingest the `count` most recent messages matching `folder`.
+    # "all": ingest every message matching `folder`, up to cfg.gmail_bulk_ingest_limit.
+    mode: str
+    folder: str = "inbox"
+    message_ids: list[str] | None = None
+    count: int | None = None
+    session_id: str | None = None
 
 
-@router.get("/salesforce/records/{sobject}/{record_id}")
-def salesforce_get_record(sobject: str, record_id: str, request: Request):
-    connector = get_salesforce_connector(_user_id(request))
-    return connector.get_record(sobject_type=sobject, record_id=record_id)
+@router.post("/outlook/ingest/bulk")
+async def outlook_ingest_bulk(request: Request, body: OutlookBulkIngestRequest):
+    """Mirrors /connectors/gmail/ingest/bulk exactly (same modes, same SSE
+    event shape) - see that endpoint's docstring. Each message goes through
+    pipeline_bridge.ingest_outlook_message (body + every attachment's
+    extracted text + any linked page), looped the same way."""
+    user_id = _user_id(request)
+    client_token = f"connector:{user_id}"
+    connector = get_outlook_connector(user_id)
+
+    if body.folder not in OUTLOOK_FOLDERS:
+        raise HTTPException(400, f"Unknown folder '{body.folder}'. Allowed: {', '.join(OUTLOOK_FOLDERS)}")
+
+    if body.mode == "selected":
+        if not body.message_ids:
+            raise HTTPException(400, "message_ids is required for mode='selected'")
+        message_ids = body.message_ids[:cfg.gmail_bulk_ingest_limit]
+    elif body.mode == "count":
+        if not body.count or body.count < 1:
+            raise HTTPException(400, "count is required (>=1) for mode='count'")
+        limit = min(body.count, cfg.gmail_bulk_ingest_limit)
+        message_ids = connector.list_message_ids(folder=body.folder, limit=limit)
+    elif body.mode == "all":
+        message_ids = connector.list_message_ids(folder=body.folder, limit=cfg.gmail_bulk_ingest_limit)
+    else:
+        raise HTTPException(400, "mode must be one of: selected, count, all")
+
+    async def stream() -> AsyncGenerator[str, None]:
+        t0 = time.time()
+        session_id = body.session_id
+        total = len(message_ids)
+        ingested = 0
+
+        if total == 0:
+            yield sse({"type": "complete", "session_id": session_id, "total_elapsed": 0.0,
+                       "completion_message": "No matching emails found"})
+            return
+
+        if body.mode == "all" and total >= cfg.gmail_bulk_ingest_limit:
+            yield sse({"type": "warning",
+                       "message": f"Capped at {cfg.gmail_bulk_ingest_limit} most recent emails for this bulk ingest."})
+            await asyncio.sleep(0)
+
+        for i, message_id in enumerate(message_ids):
+            stage = f"outlook_{i}"
+            yield sse({"type": "step", "status": "start", "stage": stage,
+                       "title": f"Ingesting emails ({i + 1}/{total})",
+                       "message": f"Fetching email {i + 1} of {total}..."})
+            await asyncio.sleep(0)
+            t1 = time.time()
+            try:
+                result = await pipeline_bridge.ingest_outlook_message(
+                    message_id=message_id, user_id=user_id, client_token=client_token, session_id=session_id,
+                )
+                session_id = result["session_id"]
+                ingested += 1
+                yield sse({"type": "step", "status": "done", "stage": stage,
+                           "message": result["filename"], "elapsed": round(time.time() - t1, 2)})
+            except Exception as e:
+                logger.warning(f"[CONNECTORS][OUTLOOK][BULK] message {message_id} failed: {e}")
+                yield sse({"type": "step", "status": "error", "stage": stage,
+                           "message": f"Email {i + 1} failed: {e}"})
+            await asyncio.sleep(0)
+
+        yield sse({
+            "type": "complete", "session_id": session_id,
+            "total_elapsed": round(time.time() - t0, 2),
+            "completion_message": f"Ingested {ingested}/{total} emails - ready to chat!",
+        })
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers=SSE_HEADERS)
 
 
-@oauth_callback_router.get("/salesforce/callback")
-def salesforce_callback(code: str = Query(...), state: str = Query(default="")):
+@oauth_callback_router.get("/outlook/callback")
+def outlook_callback(code: str = Query(...), state: str = Query(default="")):
     user_id = state
     if not user_id:
-        raise HTTPException(400, "Missing state (user id) on Salesforce OAuth callback")
-    connector = get_salesforce_connector(user_id)
+        raise HTTPException(400, "Missing state (user id) on Outlook OAuth callback")
+    connector = get_outlook_connector(user_id)
     connector.exchange_code_for_token(code)
-    return RedirectResponse(url="/?connected=salesforce")
+
+    # Outlook Chat shares this exact OAuth grant (outlook.py's SCOPES already
+    # request Chat.Read) - mirror the token into a second "outlook_chat" row
+    # so connecting Outlook connects Outlook Chat too, with no separate
+    # consent step or callback.
+    outlook_token = token_store.get_token(user_id, "outlook")
+    if outlook_token:
+        token_store.save_token(
+            user_id, "outlook_chat",
+            access_token=outlook_token["access_token"],
+            refresh_token=outlook_token["refresh_token"],
+            expires_at=outlook_token["expires_at"],
+        )
+
+    return RedirectResponse(url="/?connected=outlook")
+
+
+# ==========================================
+# Outlook Chat Connector Endpoints (shares Outlook's OAuth grant - no
+# auth/login or callback of its own; see outlook_callback above and
+# get_authorization_url in outlook.py)
+# ==========================================
+OUTLOOK_CHAT_TYPES = ("all", "one_on_one", "group", "meeting")
+
+
+@router.get("/outlook-chat/auth/login")
+def outlook_chat_login(request: Request):
+    connector = get_outlook_connector(_user_id(request))
+    auth_url = connector.get_authorization_url()
+    return {"auth_url": auth_url}
+
+
+@router.get("/outlook-chat/status")
+def outlook_chat_status(request: Request):
+    connector = get_outlook_chat_connector(_user_id(request))
+    return connector.get_status()
+
+
+@router.get("/outlook-chat/chats")
+def outlook_chat_list_chats(
+    request: Request,
+    chat_type: str = Query(default="all", description="One of: " + ", ".join(OUTLOOK_CHAT_TYPES)),
+    page_size: int = Query(default=50, ge=1, le=50),
+    next_link: str = Query(default=""),
+):
+    if chat_type not in OUTLOOK_CHAT_TYPES:
+        raise HTTPException(400, f"Unknown chat_type '{chat_type}'. Allowed: {', '.join(OUTLOOK_CHAT_TYPES)}")
+    connector = get_outlook_chat_connector(_user_id(request))
+    return connector.list_chats(chat_type=chat_type, page_size=page_size, next_link=next_link)
+
+
+class OutlookChatBulkIngestRequest(BaseModel):
+    mode: str  # "selected" | "all"
+    chat_type: str = "all"
+    chat_ids: list[str] | None = None
+    session_id: str | None = None
+
+
+@router.post("/outlook-chat/ingest/bulk")
+async def outlook_chat_ingest_bulk(request: Request, body: OutlookChatBulkIngestRequest):
+    """Mirrors /connectors/google-chat/ingest/bulk exactly (same modes, same
+    SSE event shape) - see that endpoint's docstring. Each chat goes through
+    pipeline_bridge.ingest_outlook_chat, looped the same way."""
+    user_id = _user_id(request)
+    client_token = f"connector:{user_id}"
+    connector = get_outlook_chat_connector(user_id)
+
+    if body.chat_type not in OUTLOOK_CHAT_TYPES:
+        raise HTTPException(400, f"Unknown chat_type '{body.chat_type}'. Allowed: {', '.join(OUTLOOK_CHAT_TYPES)}")
+
+    if body.mode == "selected":
+        if not body.chat_ids:
+            raise HTTPException(400, "chat_ids is required for mode='selected'")
+        chat_ids = body.chat_ids[:cfg.gmail_bulk_ingest_limit]
+    elif body.mode == "all":
+        chat_ids = connector.list_chat_ids(chat_type=body.chat_type, limit=cfg.gmail_bulk_ingest_limit)
+    else:
+        raise HTTPException(400, "mode must be one of: selected, all")
+
+    async def stream() -> AsyncGenerator[str, None]:
+        t0 = time.time()
+        session_id = body.session_id
+        total = len(chat_ids)
+        ingested = 0
+
+        if total == 0:
+            yield sse({"type": "complete", "session_id": session_id, "total_elapsed": 0.0,
+                       "completion_message": "No matching chats found"})
+            return
+
+        if body.mode == "all" and total >= cfg.gmail_bulk_ingest_limit:
+            yield sse({"type": "warning",
+                       "message": f"Capped at {cfg.gmail_bulk_ingest_limit} most recent chats for this bulk ingest."})
+            await asyncio.sleep(0)
+
+        for i, chat_id in enumerate(chat_ids):
+            stage = f"outlook_chat_{i}"
+            yield sse({"type": "step", "status": "start", "stage": stage,
+                       "title": f"Ingesting chats ({i + 1}/{total})",
+                       "message": f"Fetching chat {i + 1} of {total}..."})
+            await asyncio.sleep(0)
+            t1 = time.time()
+            try:
+                result = await pipeline_bridge.ingest_outlook_chat(
+                    chat_id=chat_id, user_id=user_id, client_token=client_token, session_id=session_id,
+                )
+                session_id = result["session_id"]
+                ingested += 1
+                yield sse({"type": "step", "status": "done", "stage": stage,
+                           "message": result["filename"], "elapsed": round(time.time() - t1, 2)})
+            except Exception as e:
+                logger.warning(f"[CONNECTORS][OUTLOOK_CHAT][BULK] chat {chat_id} failed: {e}")
+                yield sse({"type": "step", "status": "error", "stage": stage,
+                           "message": f"Chat {i + 1} failed: {e}"})
+            await asyncio.sleep(0)
+
+        yield sse({
+            "type": "complete", "session_id": session_id,
+            "total_elapsed": round(time.time() - t0, 2),
+            "completion_message": f"Ingested {ingested}/{total} chats - ready to chat!",
+        })
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers=SSE_HEADERS)
 
 
 # ==========================================
@@ -870,30 +1214,14 @@ def azure_devops_file(
 async def _fetch_connector_file(provider: str, body: dict, user_id: str) -> tuple[bytes, str]:
     """Downloads (or synthesizes, for record-oriented connectors) the bytes +
     filename for one connector-sourced "document", given a small per-provider
-    identifier dict. Record-oriented connectors (Jira, ServiceNow, Salesforce,
-    Teams) don't expose raw files in the PoC, so their record data is rendered
+    identifier dict. Record-oriented connectors (Teams) don't expose raw
+    files in the PoC, so their record data is rendered
     to plain text and ingested as a .txt document instead of a raw download.
 
     This function only talks to connector clients (app.connectors.clients.*)
     - it has no knowledge of the RAG pipeline. The RAG-specific orchestration
     lives in app.connectors.pipeline_bridge.ingest_bytes, which the /ingest
     endpoint below calls with the (content, filename) this function returns."""
-
-    if provider == "file_share":
-        path = body.get("path")
-        if not path:
-            raise HTTPException(400, "path is required for file_share")
-        connector = get_file_share_connector()
-        file_path = connector.get_file(path)
-        return file_path.read_bytes(), file_path.name
-
-    if provider == "lms":
-        file_id = body.get("file_id")
-        if not file_id:
-            raise HTTPException(400, "file_id is required for lms")
-        connector = get_lms_connector()
-        file_path = connector.get_file(file_id)
-        return file_path.read_bytes(), file_path.name
 
     if provider == "github":
         owner, repo, path = body.get("owner"), body.get("repo"), body.get("path")
@@ -940,40 +1268,6 @@ async def _fetch_connector_file(provider: str, body: dict, user_id: str) -> tupl
         except AzureDevOpsError as exc:
             raise HTTPException(502, str(exc)) from exc
 
-    if provider == "jira":
-        issue_key = body.get("issue_key")
-        if not issue_key:
-            raise HTTPException(400, "issue_key is required for jira")
-        connector = get_jira_connector(user_id)
-        issue = connector.get_issue(issue_key)
-        text = (
-            f"Jira Issue {issue.get('key')}: {issue.get('summary')}\n"
-            f"Status: {issue.get('status')} | Priority: {issue.get('priority')} | Type: {issue.get('type')}\n"
-            f"Assignee: {issue.get('assignee')} | Reporter: {issue.get('reporter')}\n\n"
-            f"Description:\n{issue.get('description', '')}\n\n"
-            + "\n".join(f"Comment by {c.get('author')} ({c.get('created')}):\n{c.get('body')}\n"
-                        for c in issue.get("comments", []))
-        )
-        return text.encode("utf-8"), f"jira_{issue_key}.txt"
-
-    if provider == "servicenow":
-        sys_id = body.get("sys_id")
-        if not sys_id:
-            raise HTTPException(400, "sys_id is required for servicenow")
-        connector = get_servicenow_connector(user_id)
-        incident = connector.get_incident(sys_id)
-        text = "\n".join(f"{k}: {v}" for k, v in incident.items())
-        return text.encode("utf-8"), f"servicenow_{sys_id}.txt"
-
-    if provider == "salesforce":
-        sobject, record_id = body.get("sobject"), body.get("record_id")
-        if not (sobject and record_id):
-            raise HTTPException(400, "sobject and record_id are required for salesforce")
-        connector = get_salesforce_connector(user_id)
-        record = connector.get_record(sobject_type=sobject, record_id=record_id)
-        text = "\n".join(f"{k}: {v}" for k, v in record.items() if not str(k).startswith("attributes"))
-        return text.encode("utf-8"), f"salesforce_{sobject}_{record_id}.txt"
-
     if provider == "teams":
         team_id, channel_id = body.get("team_id"), body.get("channel_id")
         if not (team_id and channel_id):
@@ -1002,16 +1296,11 @@ async def ingest_connector_file(provider: str, request: Request, body: dict = Bo
     the result is a normal session_id the existing /chat endpoint can use.
 
     Body is a small per-provider identifier dict, e.g.:
-      file_share:    {"path": "..."}
-      lms:           {"file_id": "..."}
       github:        {"owner": "...", "repo": "...", "path": "...", "ref": "..."}
       gmail:         {"message_id": "..."} - ingests the whole email (body + every attachment's extracted text)
       google_drive:  {"file_id": "..."}
       sharepoint:    {"drive_id": "...", "item_id": "..."}
       azure_devops:  {"project": "...", "repo_id": "...", "path": "..."}
-      jira:          {"issue_key": "..."}
-      servicenow:    {"sys_id": "..."}
-      salesforce:    {"sobject": "...", "record_id": "..."}
       teams:         {"team_id": "...", "channel_id": "...", "limit": 50}
 
     An optional "session_id" key in the body (any provider) attaches this

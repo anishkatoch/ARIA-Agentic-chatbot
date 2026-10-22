@@ -1,10 +1,10 @@
 # app/connectors - source-system connectors package
 
 This package is a self-contained integration layer that lets a host
-application browse and pull content from 11 external source systems (File
-Share, LMS, GitHub, Gmail, Google Drive, SharePoint, Microsoft Teams, Azure
-DevOps Repos, Jira, ServiceNow, Salesforce) and feed whatever the user picks
-into the host's own RAG/document-ingestion pipeline.
+application browse and pull content from 9 external source systems (GitHub,
+Gmail, Google Drive, Google Chat, Outlook, Outlook Chat, SharePoint,
+Microsoft Teams, Azure DevOps Repos) and feed whatever the user picks into
+the host's own RAG/document-ingestion pipeline.
 
 It was built inside the "ARIA" RAG chatbot project but is written to be
 **lifted out and dropped into a different host app** with minimal untangling.
@@ -14,15 +14,16 @@ This document is written for the developer doing that lift.
 
 ```
 app/connectors/
-  clients/              11 connector client modules + microsoft_graph.py (shared
+  clients/              9 connector client modules + microsoft_graph.py (shared
                          Graph API helper used by sharepoint.py and teams.py).
                          Each client module exposes either a get_<provider>_connector()
                          factory function or a <Provider>Connector class. None of
                          these files import anything from the host app.
   token_store.py         Per-user OAuth token persistence (Gmail, Google Drive,
-                         Salesforce) backed by one DB table (see below). Only
-                         host dependency: app.db.session.get_session_factory,
-                         resolved lazily and wrapped in try/except.
+                         Google Chat, Outlook, Outlook Chat) backed by one DB
+                         table (see below). Only host dependency:
+                         app.db.session.get_session_factory, resolved lazily
+                         and wrapped in try/except.
   models.py               The ConnectorToken SQLAlchemy model, on its OWN
                          declarative_base() - this package does not import or
                          depend on the host app's model module in any way.
@@ -42,7 +43,7 @@ app/connectors/
                          `unlock_router` (prefix "/connectors", just the one
                          POST /connectors/unlock endpoint, NOT gated - that's
                          how a caller gets a key to unlock the rest), and
-                         `oauth_callback_router` (no prefix, the 3 OAuth
+                         `oauth_callback_router` (no prefix, the OAuth
                          callback endpoints that must live at a fixed literal
                          path).
 ```
@@ -53,7 +54,7 @@ Every route on `router` (everything except `/connectors/unlock` and the OAuth
 callbacks) requires a second secret beyond the normal login token: a value
 the deployment owner sets once in `CONNECTORS_ACCESS_KEY` (generate one with
 `python -c "import secrets; print(secrets.token_urlsafe(32))"`). This exists
-because a connected Gmail/GitHub/Jira/Salesforce session is real access to
+because a connected Gmail/GitHub session is real access to
 someone's real third-party account - a step above ordinary app data, worth
 its own separate gate rather than relying solely on the regular login.
 
@@ -75,12 +76,14 @@ them on by setting this value.
 
 ## The one DB table
 
-One table, `connector_tokens`, used only by the 3 OAuth-based connectors
-(Gmail, Google Drive, Salesforce) to store per-user access/refresh tokens.
-The other 8 connectors are either unauthenticated (LMS, a mock/demo
-connector), authenticated with a single shared service credential from env
-vars (File Share, GitHub, SharePoint, Teams, Azure DevOps, Jira, ServiceNow),
-or in Salesforce's case OAuth like Gmail/Drive.
+One table, `connector_tokens`, used by the 5 OAuth-based connectors (Gmail,
+Google Drive, Google Chat, Outlook, Outlook Chat) to store per-user access/
+refresh tokens. Gmail+Google Chat share one Google OAuth grant, and
+Outlook+Outlook Chat share one Microsoft OAuth grant - each pair gets two
+rows with identical tokens (mirrored at callback time; see gmail_callback/
+outlook_callback in router.py), not one row shared between two providers.
+The other 3 connectors (GitHub, SharePoint+Teams, Azure DevOps) are
+authenticated with a single shared service credential from env vars instead.
 
 Schema (see `app/connectors/models.py`):
 
@@ -88,11 +91,11 @@ Schema (see `app/connectors/models.py`):
 |----------------|-----------|------------------------------------------------------|
 | id             | UUID (pk) |                                                      |
 | user_id        | String    | host app's user id (plain string, not assumed UUID) |
-| provider       | String    | "gmail" \| "google_drive" \| "salesforce"           |
+| provider       | String    | "gmail" \| "google_drive" \| "google_chat" \| "outlook" \| "outlook_chat" |
 | access_token   | Text      |                                                      |
 | refresh_token  | Text      | nullable                                            |
 | expires_at     | DateTime  | nullable                                            |
-| extra          | Text      | JSON-encoded provider-specific metadata (e.g. Salesforce instance_url) |
+| extra          | Text      | JSON-encoded provider-specific metadata             |
 | created_at     | DateTime  |                                                      |
 | updated_at     | DateTime  |                                                      |
 
@@ -135,17 +138,24 @@ reports as "not configured" at `GET /connectors/status` rather than crashing.
 Pulled verbatim from this project's `.env.example`:
 
 ```
-# Google OAuth - shared by Gmail + Google Drive connectors
+# Google OAuth - shared by Gmail + Google Drive + Google Chat connectors
+# (Google Chat shares Gmail's grant - no separate client id/secret/redirect)
 GOOGLE_CLIENT_ID=your-google-client-id
 GOOGLE_CLIENT_SECRET=your-google-client-secret
 # Must match the redirect URI registered in Google Cloud Console.
 GOOGLE_REDIRECT_URI=http://localhost:8000/gmail/callback
 GOOGLE_DRIVE_REDIRECT_URI=http://localhost:8000/google-drive/callback
 
-# Microsoft Entra ID / Microsoft Graph - SharePoint + Teams
+# Microsoft Entra ID / Microsoft Graph - SharePoint + Teams (app-only,
+# client-credentials) AND Outlook + Outlook Chat (delegated user OAuth,
+# same app registration's client id/secret, Outlook Chat shares Outlook's
+# grant - no separate client id/secret/redirect for it).
 MICROSOFT_TENANT_ID=your-tenant-id
 MICROSOFT_CLIENT_ID=your-application-client-id
 MICROSOFT_CLIENT_SECRET=your-client-secret
+# Must match a "Web" platform redirect URI on that same app registration,
+# with Mail.Read + Chat.Read + offline_access delegated permissions granted.
+OUTLOOK_REDIRECT_URI=http://localhost:8000/outlook/callback
 
 # Azure DevOps Repos
 AZURE_DEVOPS_ORG_URL=https://dev.azure.com/your-organization
@@ -153,38 +163,14 @@ AZURE_DEVOPS_PAT=your-personal-access-token
 
 # GitHub - personal access token (repo read scope)
 GITHUB_TOKEN=your-github-personal-access-token
-
-# Jira Cloud
-JIRA_BASE_URL=https://your-domain.atlassian.net
-JIRA_EMAIL=your-email@example.com
-JIRA_API_TOKEN=your-api-token
-
-# ServiceNow Table API
-SERVICENOW_INSTANCE_URL=https://your-instance.service-now.com
-SERVICENOW_USERNAME=your-username
-SERVICENOW_PASSWORD=your-password
-
-# Salesforce REST API
-SALESFORCE_INSTANCE_URL=https://your-instance.salesforce.com
-SALESFORCE_CLIENT_ID=your-connected-app-client-id
-SALESFORCE_CLIENT_SECRET=your-connected-app-client-secret
-SALESFORCE_REDIRECT_URI=http://localhost:8000/salesforce/callback
-
-# File Share connector - local/dev only; points at a directory on disk, so it
-# has no equivalent once deployed somewhere without a persistent local filesystem.
-FILE_SHARE_ROOT=/path/to/your/test-share
 ```
 
-The LMS connector needs no env vars at all - it's a mock/demo connector that
-reads bundled sample data, included mainly as a reference implementation of
-the simplest possible connector shape.
-
 Three of these vars (`GOOGLE_REDIRECT_URI`, `GOOGLE_DRIVE_REDIRECT_URI`,
-`SALESFORCE_REDIRECT_URI`) are **not just config** - they must exactly match
+`OUTLOOK_REDIRECT_URI`) are **not just config** - they must exactly match
 the literal path the `oauth_callback_router` is mounted at in the host app
-(see below), because the browser is redirected there directly by
-Google/Salesforce with no `Authorization` header, so that path cannot sit
-behind the host's normal auth middleware.
+(see below), because the browser is redirected there directly by Google/
+Microsoft with no `Authorization` header, so that path cannot sit behind
+the host's normal auth middleware.
 
 ## The one adapter function a new host app must implement
 
@@ -204,7 +190,7 @@ through ingestion. A new host app rewrites the body of `ingest_bytes` to call
 its own parse -> chunk -> embed (-> optional dedup) pipeline instead of this
 project's `app.services.{ingestion,dedup,rag,vector_store}` and
 `app.routers.upload`, keeping the same input/output contract so `router.py`
-and everything upstream of it (the frontend, the 11 client modules) needs no
+and everything upstream of it (the frontend, the 9 client modules) needs no
 changes at all.
 
 ## Wiring this package into a host FastAPI app
@@ -227,8 +213,8 @@ Plus two entries in the host's own auth-gating logic:
 # Protect every /connectors/... route behind the same auth as the rest of the app:
 _PROTECTED_PREFIXES = (..., "/connectors/")
 
-# Leave the 3 OAuth callback paths PUBLIC (no Bearer token on these requests):
-_PUBLIC_PREFIXES = (..., "/gmail/callback", "/google-drive/callback", "/salesforce/callback")
+# Leave the OAuth callback paths PUBLIC (no Bearer token on these requests):
+_PUBLIC_PREFIXES = (..., "/gmail/callback", "/google-drive/callback", "/outlook/callback")
 ```
 
 That's the entire integration surface: two `include_router` calls and two

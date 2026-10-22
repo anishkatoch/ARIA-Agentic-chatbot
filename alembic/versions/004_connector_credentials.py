@@ -1,5 +1,5 @@
 """Add connector_credentials table - per-user "bring your own key" override
-for the GitHub / Jira / ServiceNow / Azure DevOps connectors, which otherwise
+for the GitHub / Azure DevOps connectors, which otherwise
 only read a single shared app-level env var.
 
 Revision ID: 004

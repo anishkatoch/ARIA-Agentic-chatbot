@@ -43,8 +43,13 @@ _ARIA_SYSTEM = (
     "based on the documents: stay calm, do not apologise, calmly clarify what the "
     "documents say.\n"
     "- Never apologise more than once per mistake. One clear acknowledgement is enough.\n"
-    "- If the user asks something completely unrelated to the uploaded documents, "
-    "politely say you can only answer questions about the provided data.\n"
+    "- Greetings and small talk (hi, hello, thanks, bye, how are you, etc.) are NOT "
+    "off-topic - reply to these naturally and warmly, never with the refusal below.\n"
+    "- If the user's message mixes a greeting with a question (e.g. 'hi, what is this "
+    "document about?'), briefly acknowledge the greeting and then answer the question.\n"
+    "- If the user asks something completely unrelated to the uploaded documents "
+    "(not a greeting/small talk), politely say you can only answer questions about "
+    "the provided data - but still acknowledge any greeting in the same message first.\n"
 )
 
 # ── Conversation history ──────────────────────────────────────────────────────
@@ -264,9 +269,58 @@ def find_page(char_offset: int, page_spans: list[dict]) -> tuple[int, float | No
     return last["page_number"], last["confidence"]
 
 
+# ── Raw doc/metadata fetch (dual-backend: Chroma + PGVector) ──────────────────
+
+def _fetch_all_docs_and_metas(vectorstore) -> tuple[list[str], list[dict]]:
+    """Returns (documents, metadatas) for every chunk in this store, regardless
+    of backend. Chroma exposes this directly via `_collection.get()`; PGVector
+    has no such public API (only id-based delete - see delete_vectors_by_source's
+    comment), so this reads its underlying langchain_pg_embedding/
+    langchain_pg_collection tables directly instead, the same stable-schema
+    approach used there. Without this PGVector branch, every call site that
+    needs "all chunks for this session" (BM25 indexing, source listing, broad
+    whole-document retrieval) silently sees zero documents on PGVector/Supabase
+    - which is this project's production backend - so BM25 keyword search and
+    source-aware retrieval would otherwise never actually run outside local
+    ChromaDB dev sessions."""
+    if hasattr(vectorstore, "_collection"):
+        data = vectorstore._collection.get(include=["documents", "metadatas"])
+        return list(data.get("documents") or []), list(data.get("metadatas") or [])
+
+    collection_name = getattr(vectorstore, "collection_name", None)
+    if not collection_name:
+        return [], []
+    try:
+        from sqlalchemy import text
+        from app.services.vector_store import _get_db_engine
+        with _get_db_engine().connect() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT e.document, e.cmetadata FROM langchain_pg_embedding e "
+                    "JOIN langchain_pg_collection c ON e.collection_id = c.uuid "
+                    "WHERE c.name = :collection"
+                ),
+                {"collection": collection_name},
+            ).fetchall()
+        docs  = [r[0] for r in rows]
+        metas = [dict(r[1] or {}) for r in rows]
+        return docs, metas
+    except Exception as e:
+        logger.warning(f"[STORE] _fetch_all_docs_and_metas failed for PGVector collection={collection_name}: {e}")
+        return [], []
+
+
 # ── BM25 index (per session, rebuilt on demand) ───────────────────────────────
 
 _bm25_cache: dict[str, tuple] = {}  # session_id → (BM25Okapi, docs)
+
+
+def invalidate_bm25_cache(session_id: str) -> None:
+    """Drops this session's cached BM25 index so the next hybrid retrieval
+    rebuilds it from the vector store's current contents - needed after
+    detaching a document, otherwise its chunks would keep surfacing via
+    BM25 even though they're gone from the vector store."""
+    _bm25_cache.pop(session_id, None)
 
 
 def _get_or_build_bm25(vectorstore, session_id: str):
@@ -274,13 +328,7 @@ def _get_or_build_bm25(vectorstore, session_id: str):
         return _bm25_cache[session_id]
     try:
         from rank_bm25 import BM25Okapi
-        if hasattr(vectorstore, "_collection"):
-            data = vectorstore._collection.get(include=["documents", "metadatas"])
-        else:
-            data = {"documents": [], "metadatas": []}
-
-        docs = data.get("documents") or []
-        metas = data.get("metadatas") or []
+        docs, metas = _fetch_all_docs_and_metas(vectorstore)
         if not docs:
             logger.warning(f"[BM25] No documents found for session={session_id}, skipping BM25")
             return None, [], []
@@ -434,6 +482,234 @@ def _hybrid_retrieve(vectorstore, session_id: str, queries: list[str]) -> list:
     return reranked
 
 
+# ── Source resolution (filenames, type aliases, connector aliases) ───────────
+#
+# Fixes the class of question that pure semantic similarity can't answer:
+# "what is in this document", "what's in the excel", "what is in this chat",
+# "what's in my inbox" - these reference a SOURCE by name/alias/demonstrative,
+# not by topical content, so embedding similarity against the question text
+# finds nothing reliable. Resolving the reference first and then pulling that
+# source's chunks directly (in document order, not by relevance) is what
+# actually answers them.
+
+# filename-extension groups a casual word can refer to
+_EXT_ALIASES: dict[str, set[str]] = {
+    "excel":      {".xlsx", ".xls", ".csv"},
+    "spreadsheet": {".xlsx", ".xls", ".csv"},
+    "sheet":      {".xlsx", ".xls", ".csv"},
+    "csv":        {".csv"},
+    "word":       {".doc", ".docx"},
+    "docx":       {".doc", ".docx"},
+    "pdf":        {".pdf"},
+    "powerpoint": {".ppt", ".pptx"},
+    "ppt":        {".ppt", ".pptx"},
+    "slide":      {".ppt", ".pptx"},
+    "slides":     {".ppt", ".pptx"},
+    "markdown":   {".md"},
+    "text file":  {".txt"},
+}
+
+# connector-provider groups a casual word can refer to (metadata["connector"])
+_CONNECTOR_ALIASES: dict[str, set[str]] = {
+    "chat":    {"google_chat", "outlook_chat"},
+    "space":   {"google_chat"},
+    "inbox":   {"gmail", "outlook"},
+    "mail":    {"gmail", "outlook"},
+    "email":   {"gmail", "outlook"},
+    "gmail":   {"gmail"},
+    "outlook": {"outlook", "outlook_chat"},
+}
+
+_DEMONSTRATIVE_RE = re.compile(
+    r'\b(this|the|that|my)\s+(file|document|doc|data|sheet|excel|spreadsheet|'
+    r'pdf|chat|conversation|space|inbox|mail|email|attachment)\b',
+    re.IGNORECASE,
+)
+
+_BROAD_QUERY_RE = re.compile(
+    # "is"/"are"/"'s" must sit directly next to "in"/"inside"/"about" (not
+    # just somewhere within N chars) so "what is the total IN row 5" doesn't
+    # false-positive the way a loose gap would - only an immediately adjacent
+    # "what is in ..." / "what's about ..." counts as the broad "what's in
+    # this X" phrasing.
+    r'\bwhat(\'s|\s+is|\s+are)\s+(in|inside|about)\b|'
+    r'\bwhat\s+(is|are)\s+(contain(ed|s)?\s+in|inside\s+of)\b|'
+    r'what\s+(does|do)\b.{0,30}\b(contain|contains|say|says|cover|covers|include|includes|talk\s+about)\b|'
+    r'what\s+(this|that|the|my)\b.{0,30}\b(contain|contains|say|says|cover|covers|include|includes|about|hold|holds)\b|'
+    r'\b(summar(y|ize|ise)|overview|contents?\s+of|key\s+points?|main\s+points?|'
+    r'important\s+points?|important\s+(thing|info|information)s?|highlights?|'
+    r'risk(s|y)?\b|takeaways?|describe\s+(this|the)|tell\s+me\s+about\s+(this|the))',
+    re.IGNORECASE,
+)
+
+
+def list_session_sources(vectorstore) -> list[dict]:
+    """Every distinct source in this session's store, as
+    [{"source": filename, "connector": provider_or_None}, ...] - built once
+    per call from the cheap metadata-only fetch (not the full BM25 tokenize
+    pass), used both for source resolution below and could be surfaced to
+    the UI/agent as "what's available"."""
+    _, metas = _fetch_all_docs_and_metas(vectorstore)
+    seen: dict[str, dict] = {}
+    for m in metas:
+        src = (m or {}).get("source")
+        if src and src not in seen:
+            seen[src] = {"source": src, "connector": (m or {}).get("connector")}
+    return list(seen.values())
+
+
+def _resolve_target_sources(question: str, sources: list[dict]) -> list[str] | None:
+    """Best-effort match from a question to the specific source(s) it's
+    referring to. Returns None if the question doesn't appear to reference
+    a particular source (normal semantic retrieval should handle it), or a
+    list of 1+ filenames to scope retrieval to.
+
+    Priority (most specific first): exact/partial filename mention > file-type
+    alias ("excel", "pdf") > connector alias ("chat", "inbox", "mail") >
+    bare demonstrative ("this document") when the session has exactly one
+    source, so "this" is unambiguous even with no name given.
+    """
+    if not sources:
+        return None
+    q = question.lower()
+
+    # 1) Direct filename mention - match the full name or its stem (sans
+    #    extension), so "what's in food safety policy" matches
+    #    "Food-Safety-Policy-01.04.19.pdf" and "summarize the budget report"
+    #    matches "budget_report.xlsx" without requiring the extension or
+    #    exact separator punctuation (spaces/hyphens/underscores/dots all
+    #    fold to a single space before comparing). A trailing version/date
+    #    suffix ("-01.04.19", "-v2") is also stripped before comparing, since
+    #    users refer to a file by its human name, not its date stamp.
+    q_norm = re.sub(r'[\s_\-]+', ' ', q).strip()
+    name_matches = []
+    for s in sources:
+        fname = s["source"]
+        stem = re.sub(r'\.[a-z0-9]{1,5}$', '', fname, flags=re.IGNORECASE).lower()
+        stem_norm = re.sub(r'[\s_\-.]+', ' ', stem).strip()
+        stem_core = re.sub(r'(\s+v?\d[\d.]*)+$', '', stem_norm, flags=re.IGNORECASE).strip()
+        fname_l = fname.lower()
+        if (
+            fname_l in q
+            or (len(stem_norm) >= 4 and stem_norm in q_norm)
+            or (len(stem_core) >= 4 and stem_core in q_norm)
+        ):
+            name_matches.append(fname)
+    if len(name_matches) == 1:
+        return name_matches
+    if len(name_matches) > 1:
+        return name_matches  # multiple distinct files explicitly named - scope to all of them
+
+    # 1b) No full-stem match - fall back to one *distinctive* token shared
+    #     between the question and a filename's stem (e.g. "xyz" in "what's
+    #     in this xyz" matching "xyz_report.pdf"). Generic words that would
+    #     match almost any upload are excluded so this doesn't fire on
+    #     every question that happens to say "report" or "final". Gated to
+    #     broad/demonstrative-sounding questions only - a single shared word
+    #     is too weak a signal to scope a specific factual lookup (e.g. "is
+    #     there anything about leave policy") to document-order retrieval,
+    #     which could miss content past the chunk cap on a long document;
+    #     it's a safe signal for "what's in this X" style questions, where
+    #     document-order retrieval is exactly what's wanted anyway.
+    if not (is_broad_query(question) or _DEMONSTRATIVE_RE.search(q)):
+        return None
+    _GENERIC_STEM_WORDS = {
+        "file", "files", "document", "documents", "doc", "docs", "data",
+        "report", "reports", "copy", "final", "draft", "v1", "v2", "v3",
+        "new", "old", "untitled", "scan", "scanned", "sheet", "chat",
+    }
+    q_tokens = set(re.findall(r'[a-z0-9]+', q_norm))
+    for s in sources:
+        fname = s["source"]
+        stem = re.sub(r'\.[a-z0-9]{1,5}$', '', fname, flags=re.IGNORECASE).lower()
+        stem_tokens = set(re.findall(r'[a-z0-9]+', stem))
+        distinctive = {t for t in stem_tokens if len(t) >= 3 and t not in _GENERIC_STEM_WORDS}
+        if distinctive & q_tokens:
+            name_matches.append(fname)
+    if len(name_matches) == 1:
+        return name_matches
+    if len(name_matches) > 1:
+        return name_matches
+
+    # 2) File-type alias ("excel", "pdf", "spreadsheet", ...)
+    ext_matches: set[str] = set()
+    for word, exts in _EXT_ALIASES.items():
+        if re.search(rf'\b{re.escape(word)}\b', q):
+            ext_matches |= exts
+    if ext_matches:
+        hits = [s["source"] for s in sources if any(s["source"].lower().endswith(e) for e in ext_matches)]
+        if hits:
+            return hits
+
+    # 3) Connector alias ("chat", "inbox", "mail", "space", ...)
+    conn_matches: set[str] = set()
+    for word, conns in _CONNECTOR_ALIASES.items():
+        if re.search(rf'\b{re.escape(word)}\b', q):
+            conn_matches |= conns
+    if conn_matches:
+        hits = [s["source"] for s in sources if s.get("connector") in conn_matches]
+        if hits:
+            return hits
+
+    # 4) Bare demonstrative ("this document", "the file") with nothing else
+    #    to go on - only safe to resolve when there's exactly one source in
+    #    the whole session, otherwise "this" is genuinely ambiguous and
+    #    should fall through to normal/ambiguity-aware retrieval.
+    if _DEMONSTRATIVE_RE.search(q) and len(sources) == 1:
+        return [sources[0]["source"]]
+
+    return None
+
+
+def is_broad_query(question: str) -> bool:
+    """True if the question asks for an overview/summary/synthesis of a
+    source rather than one specific fact - these need wide context (many
+    chunks, in document order) instead of narrow top-k semantic matches,
+    and the answering prompt should be allowed to synthesize an answer
+    (e.g. "risks", "key points") even when the document never uses those
+    exact words."""
+    return bool(_BROAD_QUERY_RE.search(question))
+
+
+def _fetch_broad_context(vectorstore, session_id: str, target_sources: list[str] | None,
+                          limit: int = 40) -> list:
+    """Pulls chunks in document order (not by relevance) for an overview-type
+    question. If target_sources is given, scopes to just those sources and
+    takes up to `limit` of their chunks in order. Otherwise (a generic "what's
+    in the data" with nothing specific named) samples chunks spread evenly
+    across every source in the session, so a multi-document KB's answer
+    isn't dominated by whichever document happens to rank first."""
+    from langchain_core.documents import Document
+
+    docs, metas = _fetch_all_docs_and_metas(vectorstore)
+    if not docs:
+        return []
+
+    items = list(zip(docs, metas))
+
+    if target_sources:
+        wanted = set(target_sources)
+        items = [(d, m) for d, m in items if (m or {}).get("source") in wanted]
+        items.sort(key=lambda dm: (dm[1] or {}).get("chunk_index", 0))
+        items = items[:limit]
+    else:
+        # Spread the cap evenly across every distinct source (round-robin by
+        # chunk_index) instead of just taking the first `limit` chunks, which
+        # on a multi-document KB would silently starve every doc but one.
+        by_source: dict[str, list] = {}
+        for d, m in items:
+            by_source.setdefault((m or {}).get("source", ""), []).append((d, m))
+        for grp in by_source.values():
+            grp.sort(key=lambda dm: (dm[1] or {}).get("chunk_index", 0))
+        per_source = max(1, limit // max(len(by_source), 1))
+        items = []
+        for grp in by_source.values():
+            items.extend(grp[:per_source])
+        items = items[:limit]
+
+    return [Document(page_content=d, metadata=m or {}) for d, m in items]
+
+
 # ── Intent check ─────────────────────────────────────────────────────────────
 
 def check_intent(question: str, history: list[dict] | None = None) -> bool:
@@ -513,8 +789,28 @@ def node_hyde(state: RAGState) -> RAGState:
     return state
 
 
+def _retrieve_for_question(vectorstore, session_id: str, question: str, queries: list[str]) -> list:
+    """Routes between broad (document-order, source-scoped) retrieval and
+    normal semantic hybrid retrieval, depending on what the question is
+    actually asking for - see the "Source resolution" section above."""
+    sources = list_session_sources(vectorstore)
+    target_sources = _resolve_target_sources(question, sources)
+    broad = bool(target_sources) or is_broad_query(question)
+
+    if broad:
+        docs = _fetch_broad_context(vectorstore, session_id, target_sources)
+        if docs:
+            logger.info(
+                f"[BROAD] question='{question[:80]}' target_sources={target_sources} → {len(docs)} chunks"
+            )
+            return docs
+        logger.info(f"[BROAD] no chunks found for target_sources={target_sources}, falling back to hybrid")
+
+    return _hybrid_retrieve(vectorstore, session_id, queries)
+
+
 def node_simple_retrieve(state: RAGState) -> RAGState:
-    docs = _hybrid_retrieve(state["vectorstore"], state["session_id"], state["queries"])
+    docs = _retrieve_for_question(state["vectorstore"], state["session_id"], state["question"], state["queries"])
     state["vector_docs"]   = docs
     state["graph_context"] = ""
     return state
@@ -531,10 +827,15 @@ def node_simple_answer(state: RAGState) -> RAGState:
         f"{history_block}"
         f"Context from documents:\n{context}\n\n"
         "Answer the question below based only on the context and conversation above.\n"
-        "- If asked to summarize → summarize everything in the context\n"
+        "- If asked to summarize or \"what's in this\" → summarize everything in the context\n"
         "- If asked something specific → answer from context\n"
         "- If asked for opinion/advice → reason from context and give your view\n"
-        "- If context has no relevant info → say so clearly\n\n"
+        "- If asked for things like key points, risks, or important points that the context "
+        "never labels with those exact words → synthesize them yourself by reasoning over what "
+        "the context actually says (e.g. a stated deadline or liability clause IS a risk, even "
+        "if the document never uses the word \"risk\"). Only say the information isn't available "
+        "if the context truly contains nothing to reason from.\n"
+        "- If context has no relevant info at all → say so clearly\n\n"
         f"Question: {question}"
     )
     resp   = llm_invoke([SystemMessage(content=_ARIA_SYSTEM), HumanMessage(content=user_turn)])
@@ -569,7 +870,7 @@ def node_query_rewrite(state: RAGState) -> RAGState:
 
 
 def node_advanced_retrieve(state: RAGState) -> RAGState:
-    docs = _hybrid_retrieve(state["vectorstore"], state["session_id"], state["queries"])
+    docs = _retrieve_for_question(state["vectorstore"], state["session_id"], state["question"], state["queries"])
     state["vector_docs"] = docs
 
     # Graph retrieval
@@ -604,10 +905,14 @@ def node_advanced_answer(state: RAGState) -> RAGState:
         f"Context (from documents):\n{vector_ctx}\n"
         f"{graph_section}"
         "Answer the question below based only on the context and conversation above.\n"
-        "- If asked to summarize → summarize everything in the context\n"
+        "- If asked to summarize or \"what's in this\" → summarize everything in the context\n"
         "- If asked something specific → answer from context\n"
         "- If asked for opinion/advice → reason from context and give your view\n"
-        "- If context has no relevant info → say so clearly\n\n"
+        "- If asked for things like key points, risks, or important points that the context "
+        "never labels with those exact words → synthesize them yourself by reasoning over what "
+        "the context actually says. Only say the information isn't available if the context "
+        "truly contains nothing to reason from.\n"
+        "- If context has no relevant info at all → say so clearly\n\n"
         f"Question: {question}"
     )
     resp   = llm_invoke([SystemMessage(content=_ARIA_SYSTEM), HumanMessage(content=user_turn)])
@@ -729,7 +1034,10 @@ def _react_tools(vectorstore, session_id: str, use_graph: bool, clarify_allowed:
 
     @tool
     def vector_search(query: str) -> str:
-        """Search the uploaded document chunks for information relevant to the query."""
+        """Search the uploaded document chunks for information relevant to the query.
+        Use this for a specific fact or detail, NOT for "what's in this file/chat/
+        email/inbox" type questions - use read_source for those instead, since a
+        narrow keyword search misses most of a document's content."""
         docs = _hybrid_retrieve(vectorstore, session_id, [query])
         if not docs:
             return "No results found."
@@ -739,7 +1047,39 @@ def _react_tools(vectorstore, session_id: str, use_graph: bool, clarify_allowed:
             for d in docs
         )
 
-    tools = [vector_search]
+    @tool
+    def read_source(name: str) -> str:
+        """Read a broad slice of ONE specific uploaded file, email, chat, or
+        other source, in its original order - use this whenever the user asks
+        what a file/chat/email/inbox "contains" or is "about", asks for a
+        summary/overview, or asks for key points/risks/takeaways that may not
+        be stated verbatim. Pass the filename (or your best guess at it from
+        the user's wording, e.g. "the excel", "this chat", "my inbox") - it
+        will be matched against the session's actual sources. If the user
+        didn't name anything specific and there's only one source, pass "this
+        document"."""
+        sources = list_session_sources(vectorstore)
+        resolved = _resolve_target_sources(name, sources)
+        if not resolved:
+            # Fall back to a literal substring match on the raw name the
+            # model passed (it may have already given an exact filename).
+            name_l = name.lower()
+            resolved = [s["source"] for s in sources if name_l in s["source"].lower()] or None
+        if not resolved and len(sources) == 1:
+            resolved = [sources[0]["source"]]
+        if not resolved:
+            available = ", ".join(s["source"] for s in sources) or "none"
+            return f"Could not match '{name}' to a specific source. Available sources: {available}"
+        docs = _fetch_broad_context(vectorstore, session_id, resolved)
+        if not docs:
+            return f"No content found for source(s): {', '.join(resolved)}"
+        collected_docs.extend(docs)
+        return "\n\n---\n\n".join(
+            f"[Source: {d.metadata.get('source','?')} p.{d.metadata.get('page_number','?')}]\n{d.page_content}"
+            for d in docs
+        )
+
+    tools = [vector_search, read_source]
 
     if use_graph:
         @tool
@@ -803,12 +1143,23 @@ def _react_answer(
     clarify_holder: dict = {}
     tools = _react_tools(vectorstore, session_id, use_graph, clarify_allowed, collected_docs, clarify_holder)
 
+    sources = list_session_sources(vectorstore)
+    sources_block = (
+        "Sources available in this session:\n" + "\n".join(f"- {s['source']}" for s in sources) + "\n\n"
+        if sources else ""
+    )
+
     system_prompt = (
         f"{_ARIA_SYSTEM}\n\n"
+        f"{sources_block}"
         "Use the available tools to find information before answering - do not answer "
-        "from prior knowledge. Call vector_search (and graph_search, if available) as "
-        "many times as needed, then give your final answer in plain text. "
-        "If nothing relevant is found after searching, say so honestly."
+        "from prior knowledge. Call vector_search for a specific fact; call read_source "
+        "when the user asks what a file/chat/email/inbox contains or is about, wants a "
+        "summary/overview, or asks for key points/risks/takeaways that may not be in the "
+        "document's exact words (reason over what read_source returns to synthesize those - "
+        "don't require the literal word to appear). Call tools as many times as needed, then "
+        "give your final answer in plain text. If nothing relevant is found after searching, "
+        "say so honestly."
     )
 
     agent = create_agent(_react_llm_with_fallbacks(tools), tools, system_prompt=system_prompt)

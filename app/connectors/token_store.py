@@ -1,6 +1,6 @@
 """Per-user OAuth token storage, backed by the `connector_tokens` table.
 
-Used by the Gmail, Google Drive, and Salesforce connectors so each user's
+Used by the Gmail and Google Drive connectors so each user's
 OAuth tokens are scoped to that user (NOT a single flat JSON file shared by
 whoever hits the server, like CONNECTOR_POC did).
 

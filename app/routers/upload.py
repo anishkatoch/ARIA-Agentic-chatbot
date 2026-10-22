@@ -11,10 +11,12 @@ from fastapi.responses import StreamingResponse
 
 from app.config import cfg
 from app.models.schemas import APIIngestRequest, IngestResponse, ConfirmRequest, ConfirmResponse
-from app.services.ingestion import parse_file, scrape_url, fetch_api
-from app.services.vector_store import get_vector_store
-from app.services.rag import chunk_text, chunk_text_with_offsets, find_page, get_llm
+from app.services.ingestion import parse_file, scrape_url, fetch_api, PLAIN_TEXT_EXTENSIONS
+from app.services.vector_store import get_vector_store, delete_vectors_by_source
+from app.services.rag import chunk_text, chunk_text_with_offsets, find_page, get_llm, invalidate_bm25_cache
 from app.services import dedup as dedup_svc
+from app.db.session import get_session_factory
+from app.models.db import Document
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/upload", tags=["upload"])
@@ -33,21 +35,28 @@ def _add_texts_batched(store, texts: list[str], metadatas: list[dict]) -> None:
         logger.info(f"[EMBED] batch {i // EMBED_BATCH_SIZE + 1}/{total_batches} - {len(batch_t)} chunks")
 
 
-async def _add_texts_batched_parallel(store, texts: list[str], metadatas: list[dict]) -> None:
-    """Embed and insert in parallel batches - faster than sequential for large docs."""
+async def _add_texts_batched_parallel(store, texts: list[str], metadatas: list[dict]) -> list[str]:
+    """Embed and insert in parallel batches - faster than sequential for large docs.
+    Returns the vectorstore ids for every inserted chunk, in no particular
+    order (batches run concurrently) - callers that need per-file deletion
+    later (e.g. the admin KB upload) persist these ids for that purpose."""
     batches = [
         (texts[i: i + EMBED_BATCH_SIZE], metadatas[i: i + EMBED_BATCH_SIZE])
         for i in range(0, len(texts), EMBED_BATCH_SIZE)
     ]
     total = len(batches)
     sem = asyncio.Semaphore(EMBED_CONCURRENCY)
+    all_ids: list[str] = []
 
     async def _run_batch(idx: int, batch_t: list, batch_m: list) -> None:
         async with sem:
-            await asyncio.to_thread(store.add_texts, batch_t, metadatas=batch_m)
+            ids = await asyncio.to_thread(store.add_texts, batch_t, metadatas=batch_m)
+            if ids:
+                all_ids.extend(ids)
             logger.info(f"[EMBED] batch {idx + 1}/{total} - {len(batch_t)} chunks")
 
     await asyncio.gather(*[_run_batch(i, bt, bm) for i, (bt, bm) in enumerate(batches)])
+    return all_ids
 
 
 async def _build_graph_async(chunks: list[str], session_id: str, filename: str):
@@ -81,7 +90,7 @@ def _spawn_background(coro) -> None:
     task.add_done_callback(_background_tasks.discard)
 
 
-ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt", ".md", ".xlsx", ".xls", ".csv"}
+ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".xlsx", ".xls", ".csv", ".zip"} | PLAIN_TEXT_EXTENSIONS
 
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
@@ -111,6 +120,83 @@ def _human_ago(dt) -> str:
     if seconds < 86400:
         return f"{seconds // 3600} hours ago"
     return f"{seconds // 86400} days ago"
+
+
+# ── /upload/session-documents ─────────────────────────────────────────────────
+# Lets the chat UI show "what's actually attached right now" for a user's own
+# personal session (files, URLs, and connector-ingested items all land in the
+# same `documents` table, keyed by session_id - so one query covers all of them).
+
+@router.get("/session-documents")
+async def list_session_documents(session_id: str):
+    factory = get_session_factory()
+    if factory is None:
+        return []
+    try:
+        sid = uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid session_id")
+    db = factory()
+    try:
+        docs = (
+            db.query(Document)
+            .filter(Document.session_id == sid, Document.status == "complete")
+            .order_by(Document.uploaded_at.asc())
+            .all()
+        )
+        return [
+            {"filename": d.filename, "source_type": d.source_type, "uploaded_at": d.uploaded_at.isoformat()}
+            for d in docs
+        ]
+    finally:
+        db.close()
+
+
+@router.delete("/session-documents")
+async def detach_session_document(
+    session_id: str,
+    filename: str,
+    x_client_token: str = Header(default="anonymous"),
+):
+    """Removes one document from a session - deletes its chunks from the
+    vector store (see delete_vectors_by_source) and its `documents` row,
+    and drops the session's cached BM25 index so a stale copy doesn't keep
+    surfacing the detached content in hybrid search. Scoped to the caller's
+    own client_token so a guessed session_id/filename can't be used to
+    detach another user's document."""
+    factory = get_session_factory()
+    if factory is None:
+        raise HTTPException(503, "Database unavailable")
+    try:
+        sid = uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid session_id")
+
+    client_token = x_client_token or "anonymous"
+    db = factory()
+    try:
+        doc = (
+            db.query(Document)
+            .filter(
+                Document.session_id == sid,
+                Document.filename == filename.lower(),
+                Document.client_token == client_token,
+            )
+            .first()
+        )
+        if doc is None:
+            raise HTTPException(404, "Document not found in this session")
+
+        store = get_vector_store(session_id)
+        removed = delete_vectors_by_source(store, filename.lower())
+        invalidate_bm25_cache(session_id)
+
+        db.delete(doc)
+        db.commit()
+        logger.info(f"[UPLOAD] Detached {filename} from session={session_id} ({removed} vectors removed)")
+        return {"detached": True, "filename": filename, "vectors_removed": removed}
+    finally:
+        db.close()
 
 
 # ── /upload/confirm ───────────────────────────────────────────────────────────
