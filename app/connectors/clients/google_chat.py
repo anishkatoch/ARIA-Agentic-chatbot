@@ -187,6 +187,23 @@ class GoogleChatConnector:
             if m.get("member", {}).get("displayName") and m.get("member", {}).get("name") != self_resource
         ]
 
+    def get_space(self, space_id: str) -> dict:
+        """Fetches one space's metadata by id - used when ingesting a single
+        space (ingest_google_chat_space only ever receives the opaque
+        space_id, never the human-readable name shown in list_spaces()'s
+        picker UI). Without this, the ingested document's filename falls
+        back to the raw id (e.g. "Google Chat - AAAAxxxxxxx.txt"), which has
+        no textual relation to what a user would actually type when asking
+        "what's in Rosotravel Internal Scrum" - so that kind of question
+        could never resolve to this source, even though a specific fact
+        from inside it was still findable by plain content search."""
+        raw = self._api_request(f"/spaces/{space_id}")
+        return {
+            "id": space_id,
+            "name": self._space_name(raw),
+            "space_type": raw.get("spaceType", "SPACE"),
+        }
+
     def list_spaces(self, space_type: str = "all", page_size: int = 50, page_token: str = "") -> dict:
         params = {"pageSize": min(max(page_size, 1), 100)}
         space_filter = SPACE_TYPE_FILTERS.get(space_type)

@@ -527,15 +527,15 @@ _DEMONSTRATIVE_RE = re.compile(
 )
 
 _BROAD_QUERY_RE = re.compile(
-    # "is"/"are"/"'s" must sit directly next to "in"/"inside"/"about" (not
-    # just somewhere within N chars) so "what is the total IN row 5" doesn't
-    # false-positive the way a loose gap would - only an immediately adjacent
-    # "what is in ..." / "what's about ..." counts as the broad "what's in
-    # this X" phrasing.
-    r'\bwhat(\'s|\s+is|\s+are)\s+(in|inside|about)\b|'
+    # "is"/"are"/"'s"/bare "s" (people often type "whats" with no apostrophe)
+    # must sit directly next to "in"/"inside"/"about" (not just somewhere
+    # within N chars) so "what is the total IN row 5" doesn't false-positive
+    # the way a loose gap would - only an immediately adjacent "what is in
+    # ..." / "whats about ..." counts as the broad "what's in this X" phrasing.
+    r'\bwhat(\'s|s|\s+is|\s+are)\s+(in|inside|about)\b|'
     r'\bwhat\s+(is|are)\s+(contain(ed|s)?\s+in|inside\s+of)\b|'
     r'what\s+(does|do)\b.{0,30}\b(contain|contains|say|says|cover|covers|include|includes|talk\s+about)\b|'
-    r'what\s+(this|that|the|my)\b.{0,30}\b(contain|contains|say|says|cover|covers|include|includes|about|hold|holds)\b|'
+    r'what(s|\s+this|\s+that|\s+the|\s+my)\b.{0,30}\b(contain|contains|say|says|cover|covers|include|includes|about|hold|holds)\b|'
     r'\b(summar(y|ize|ise)|overview|contents?\s+of|key\s+points?|main\s+points?|'
     r'important\s+points?|important\s+(thing|info|information)s?|highlights?|'
     r'risk(s|y)?\b|takeaways?|describe\s+(this|the)|tell\s+me\s+about\s+(this|the))',
@@ -580,7 +580,14 @@ def _resolve_target_sources(question: str, sources: list[dict]) -> list[str] | N
     #    exact separator punctuation (spaces/hyphens/underscores/dots all
     #    fold to a single space before comparing). A trailing version/date
     #    suffix ("-01.04.19", "-v2") is also stripped before comparing, since
-    #    users refer to a file by its human name, not its date stamp.
+    #    users refer to a file by its human name, not its date stamp - and so
+    #    is a leading "Google Chat - "/"Outlook Chat - " connector prefix and
+    #    a trailing "(<id>)" disambiguator (see pipeline_bridge.py's
+    #    ingest_google_chat_space/ingest_outlook_chat), so a bare mention of
+    #    just the space/chat's own name - "Rosotravel Internal Scrum", with
+    #    no "what's in" wrapper - still resolves to
+    #    "Google Chat - Rosotravel Internal Scrum (AAAAxxxx).txt" instead of
+    #    only ever being findable by a specific fact already inside it.
     q_norm = re.sub(r'[\s_\-]+', ' ', q).strip()
     name_matches = []
     for s in sources:
@@ -588,6 +595,8 @@ def _resolve_target_sources(question: str, sources: list[dict]) -> list[str] | N
         stem = re.sub(r'\.[a-z0-9]{1,5}$', '', fname, flags=re.IGNORECASE).lower()
         stem_norm = re.sub(r'[\s_\-.]+', ' ', stem).strip()
         stem_core = re.sub(r'(\s+v?\d[\d.]*)+$', '', stem_norm, flags=re.IGNORECASE).strip()
+        stem_core = re.sub(r'^(google chat|outlook chat)\s*[-:]*\s*', '', stem_core, flags=re.IGNORECASE)
+        stem_core = re.sub(r'\s*\([a-z0-9]+\)\s*$', '', stem_core, flags=re.IGNORECASE).strip()
         fname_l = fname.lower()
         if (
             fname_l in q
@@ -599,6 +608,37 @@ def _resolve_target_sources(question: str, sources: list[dict]) -> list[str] | N
         return name_matches
     if len(name_matches) > 1:
         return name_matches  # multiple distinct files explicitly named - scope to all of them
+
+    # 1a) ID reference - every connector-ingested document (Gmail/Outlook
+    #     messages, Google Chat/Outlook Chat spaces/chats) carries a trailing
+    #     "(<id>)" disambiguator in its filename (see pipeline_bridge.py's
+    #     _connector_doc_filename and the email filename patterns). A user
+    #     who copies or paraphrases the technical id shown in the connector
+    #     UI - "what is google chat - aaa" - should resolve just as well as
+    #     one who uses the display name. Matches in either direction (a short
+    #     typed fragment inside the stored id, or vice versa) so a truncated
+    #     id on either side still lines up. A small stoplist keeps common
+    #     words ("what", "chat", "google", ...) from being mistaken for id
+    #     fragments and causing a coincidental match.
+    _ID_MATCH_STOPWORDS = {
+        "what", "whats", "this", "that", "the", "is", "are", "in", "on", "for", "about",
+        "tell", "me", "summarize", "summarise", "describe",
+        "google", "chat", "space", "mail", "email", "inbox", "outlook", "gmail", "teams",
+    }
+    q_id_tokens = {t for t in re.findall(r'[a-z0-9]+', q_norm) if len(t) >= 3 and t not in _ID_MATCH_STOPWORDS}
+    if q_id_tokens:
+        for s in sources:
+            fname = s["source"]
+            id_match = re.search(r'\(([a-z0-9:_.\-]{4,})\)\.[a-z0-9]{1,6}$', fname, flags=re.IGNORECASE)
+            if not id_match:
+                continue
+            file_id = id_match.group(1).lower()
+            if any(tok in file_id or file_id in tok for tok in q_id_tokens):
+                name_matches.append(fname)
+        if len(name_matches) == 1:
+            return name_matches
+        if len(name_matches) > 1:
+            return name_matches
 
     # 1b) No full-stem match - fall back to one *distinctive* token shared
     #     between the question and a filename's stem (e.g. "xyz" in "what's

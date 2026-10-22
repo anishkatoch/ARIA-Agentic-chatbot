@@ -439,9 +439,21 @@ function authHeaders(extra = {}) {
 // Every /connectors/* call needs this on top of the normal auth header - the
 // server rejects anything under that prefix without a valid unlock token,
 // regardless of how valid the Bearer token is (see app/connectors/access_gate.py).
+//
+// Also sends this browser's X-Client-Token (the same one /upload/* calls
+// use) so the backend can recognize "this is the same browser that started
+// the current chat session via a plain file upload" even though connector
+// ingests are otherwise identified by the logged-in user (f"connector:{user_id}"),
+// a different identity namespace - see dedup_svc.resolve_session_id's
+// alt_client_token docstring. Without this, attaching a connector document
+// to a chat that already had an uploaded file in it silently started a
+// brand-new, disconnected session instead of joining the existing one,
+// which is why the composer's "attached documents" list only ever showed
+// the most recently added source.
 function connectorHeaders(extra = {}) {
   return authHeaders({
     ...(state.connectorsUnlockToken ? { 'X-Connectors-Unlock': state.connectorsUnlockToken } : {}),
+    ...(state.clientToken ? { 'X-Client-Token': state.clientToken } : {}),
     ...extra,
   });
 }

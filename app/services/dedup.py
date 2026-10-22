@@ -42,7 +42,11 @@ def unregister_active(client_token: str, content_hash: str) -> None:
         _active_uploads.discard((client_token, content_hash))
 
 
-def resolve_session_id(requested_session_id: Optional[str], client_token: str) -> Optional[str]:
+def resolve_session_id(
+    requested_session_id: Optional[str],
+    client_token: str,
+    alt_client_token: Optional[str] = None,
+) -> Optional[str]:
     """Validates a caller-supplied "join this existing session" request.
 
     The `sessions` table has no owner column, so ownership is checked via
@@ -51,6 +55,22 @@ def resolve_session_id(requested_session_id: Optional[str], client_token: str) -
     this, any caller could pass an arbitrary/guessed session_id (e.g. from a
     shared chat link or a request log) and have their new upload/connector
     document silently injected into a stranger's chat session.
+
+    `alt_client_token`: this app has two separate identity namespaces for
+    what's really the same browser session - a random per-browser token
+    (`X-Client-Token`, used by anonymous /upload/* calls) and
+    `f"connector:{user_id}"` (used once the user authenticates to attach a
+    connector). A chat that mixes both document sources (e.g. upload a file,
+    then attach a Gmail message to the same chat) would otherwise always
+    fail this ownership check on the second source - the session was
+    "owned" under the first token, not the second - and silently mint a
+    fresh, disconnected session for it, which is why a composer's "attached
+    documents" list only ever showed the most recent source. Passing the
+    other identity the caller can prove (its own X-Client-Token, forwarded
+    by the connector endpoints) lets the check accept either one without
+    weakening it: both tokens still have to be exactly the one already on
+    file for this session - an attacker guessing a session_id still can't
+    produce either of them.
 
     Returns the session_id if it checks out, otherwise None (caller should
     mint a fresh session instead of trusting the request) - this fails safe
@@ -64,9 +84,10 @@ def resolve_session_id(requested_session_id: Optional[str], client_token: str) -
         return None
     try:
         from app.models.db import Document
+        candidate_tokens = [t for t in {client_token, alt_client_token} if t]
         owned = (
             db.query(Document)
-            .filter(Document.session_id == requested_session_id, Document.client_token == client_token)
+            .filter(Document.session_id == requested_session_id, Document.client_token.in_(candidate_tokens))
             .first()
             is not None
         )

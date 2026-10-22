@@ -18,6 +18,7 @@ from app.services.dedup import (
     consume_confirm,
     DedupResult,
     check,
+    resolve_session_id,
     _pending_confirms,
     _resolved_actions,
 )
@@ -313,6 +314,93 @@ class TestDedupCheck:
                 avg_confidence=None,
             )
         assert result.action == "process_fresh"
+
+
+# ── resolve_session_id ────────────────────────────────────────────────────────
+# This app has two separate client_token namespaces for what's really the
+# same browser session: a random per-browser token (plain /upload/* calls)
+# and f"connector:{user_id}" (connector ingests, once authenticated). A chat
+# that mixes both document sources must still resolve to ONE session - see
+# resolve_session_id's alt_client_token docstring for the full story. These
+# tests cover that both identities are accepted, and that neither alone is
+# enough to forge ownership of someone else's session.
+
+class TestResolveSessionId:
+    def test_no_requested_session_id_returns_none(self):
+        assert resolve_session_id(None, "tok-a") is None
+        assert resolve_session_id("", "tok-a") is None
+
+    def test_db_unavailable_returns_none(self):
+        with patch("app.services.dedup._get_db_session", return_value=None):
+            assert resolve_session_id("sess-1", "tok-a") is None
+
+    def test_owned_by_primary_client_token(self):
+        db_mock = MagicMock()
+        db_mock.query.return_value.filter.return_value.first.return_value = MagicMock()
+        db_mock.close = MagicMock()
+        with patch("app.services.dedup._get_db_session", return_value=db_mock):
+            assert resolve_session_id("sess-1", "tok-a") == "sess-1"
+
+    def test_not_owned_by_either_token_returns_none(self):
+        db_mock = MagicMock()
+        db_mock.query.return_value.filter.return_value.first.return_value = None
+        db_mock.close = MagicMock()
+        with patch("app.services.dedup._get_db_session", return_value=db_mock):
+            result = resolve_session_id("sess-1", "tok-a", alt_client_token="tok-b")
+        assert result is None
+
+    def test_no_alt_client_token_still_works(self):
+        """Callers that don't have a second identity to offer (e.g. plain
+        /upload/* calls) must keep working exactly as before."""
+        db_mock = MagicMock()
+        db_mock.query.return_value.filter.return_value.first.return_value = MagicMock()
+        db_mock.close = MagicMock()
+        with patch("app.services.dedup._get_db_session", return_value=db_mock):
+            assert resolve_session_id("sess-1", "tok-a", alt_client_token=None) == "sess-1"
+
+    def test_duplicate_tokens_dont_break_the_query(self):
+        """client_token == alt_client_token (e.g. a caller that didn't bother
+        checking before passing both) must not error out."""
+        db_mock = MagicMock()
+        db_mock.query.return_value.filter.return_value.first.return_value = MagicMock()
+        db_mock.close = MagicMock()
+        with patch("app.services.dedup._get_db_session", return_value=db_mock):
+            assert resolve_session_id("sess-1", "same-tok", alt_client_token="same-tok") == "sess-1"
+
+    def test_exception_falls_back_to_none(self):
+        db_mock = MagicMock()
+        db_mock.query.side_effect = Exception("boom")
+        db_mock.close = MagicMock()
+        with patch("app.services.dedup._get_db_session", return_value=db_mock):
+            assert resolve_session_id("sess-1", "tok-a") is None
+
+    def test_both_client_token_and_alt_are_checked_against(self):
+        """The actual bug this fixes: a session created under the browser's
+        anonymous upload token must be joinable by a connector ingest
+        authenticated as f"connector:{user_id}" - a different identity for
+        the same real user/browser - as long as that connector call also
+        proves the browser's original token via alt_client_token. Asserts
+        on the real (unmocked) SQLAlchemy IN-clause actually sent to the
+        query, not just the final return value, so this fails loudly if a
+        future change silently drops one of the two candidate tokens."""
+        db_mock = MagicMock()
+        db_mock.close = MagicMock()
+        captured = {}
+
+        def fake_filter(*args, **kwargs):
+            captured["args"] = args
+            return db_mock.query.return_value.filter.return_value
+        db_mock.query.return_value.filter.side_effect = fake_filter
+        db_mock.query.return_value.filter.return_value.first.return_value = MagicMock()
+
+        with patch("app.services.dedup._get_db_session", return_value=db_mock):
+            result = resolve_session_id("sess-1", "connector:user-1", alt_client_token="browser-tok-xyz")
+
+        assert result == "sess-1"
+        in_clause = captured["args"][1]  # Document.client_token.in_(candidate_tokens)
+        compiled = str(in_clause.compile(compile_kwargs={"literal_binds": True}))
+        assert "connector:user-1" in compiled
+        assert "browser-tok-xyz" in compiled
 
 
 # ── Helper: make asyncio.to_thread synchronous in tests ──────────────────────

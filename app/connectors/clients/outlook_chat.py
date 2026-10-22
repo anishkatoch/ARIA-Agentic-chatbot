@@ -183,6 +183,18 @@ class OutlookChatConnector:
             return ", ".join(others)
         return "Direct message" if c.get("chatType") == "oneOnOne" else "Group chat"
 
+    def get_chat(self, chat_id: str) -> dict:
+        """Fetches one chat's metadata by id - mirrors
+        GoogleChatConnector.get_space, same reason: ingest_outlook_chat only
+        ever receives the opaque chat_id, never the human-readable topic/
+        member-name shown in list_chats()'s picker UI."""
+        raw = self._api_request(f"/me/chats/{chat_id}", {"$expand": "members"})
+        return {
+            "id": chat_id,
+            "name": self._chat_name(raw),
+            "chat_type": raw.get("chatType", "oneOnOne"),
+        }
+
     def list_chats(self, chat_type: str = "all", page_size: int = 50, next_link: str = "") -> dict:
         if next_link:
             raw = self._api_request(next_link)

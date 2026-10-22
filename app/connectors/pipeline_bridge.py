@@ -58,6 +58,19 @@ logger = logging.getLogger(__name__)
 _URL_RE = re.compile(r'https?://[^\s<>\]\)"]+')
 
 
+def _connector_doc_filename(prefix: str, display_name: str, item_id: str) -> str:
+    """Builds the filename a conversation/space-style connector document is
+    ingested under: "<prefix> - <display name> (<short id>).txt". Used by
+    ingest_google_chat_space and ingest_outlook_chat so the filename carries
+    the human-readable space/chat name (what a user would actually type
+    when asking "what's in Rosotravel Internal Scrum"), not just the opaque
+    space/chat id that caller's platform API hands back - the id suffix is
+    kept only to disambiguate two spaces/chats that happen to share a name.
+    """
+    safe_name = re.sub(r"[^A-Za-z0-9 ._-]+", "", display_name).strip()[:60] or "chat"
+    return f"{prefix} - {safe_name} ({item_id[-8:]}).txt"
+
+
 async def _scrape_links_in_text(text: str, max_links: int = 3) -> str:
     """Finds plain URLs inside an email/chat-message's text and scrapes each
     one's page content through the existing scrape_url() pipeline, so a
@@ -82,7 +95,7 @@ async def _scrape_links_in_text(text: str, max_links: int = 3) -> str:
 
 
 async def ingest_bytes(provider: str, content: bytes, filename: str, user_id: str, client_token: str,
-                        session_id: str | None = None) -> dict:
+                        session_id: str | None = None, alt_client_token: str | None = None) -> dict:
     """Runs connector-sourced bytes through the existing RAG ingestion
     pipeline (the same parse/chunk/embed/dedup path /upload/files uses), so
     the result is a normal session_id the existing /chat endpoint can use.
@@ -105,7 +118,7 @@ async def ingest_bytes(provider: str, content: bytes, filename: str, user_id: st
     if size_mb > cfg.max_file_size_mb:
         raise HTTPException(400, f"{filename} exceeds {cfg.max_file_size_mb} MB limit")
 
-    session_id = dedup_svc.resolve_session_id(session_id, client_token) or str(uuid.uuid4())
+    session_id = dedup_svc.resolve_session_id(session_id, client_token, alt_client_token) or str(uuid.uuid4())
     store = get_vector_store(session_id)
 
     text, page_spans = await parse_file(content, filename)
@@ -237,7 +250,7 @@ async def ingest_bytes(provider: str, content: bytes, filename: str, user_id: st
 
 
 async def ingest_gmail_message(message_id: str, user_id: str, client_token: str,
-                                session_id: str | None = None) -> dict:
+                                session_id: str | None = None, alt_client_token: str | None = None) -> dict:
     """Ingests a whole Gmail email - its own body text plus the extracted
     text of every attachment it has - as one combined document, instead of
     requiring the caller to pick a single attachment to add. Each attachment
@@ -284,11 +297,12 @@ async def ingest_gmail_message(message_id: str, user_id: str, client_token: str,
     return await ingest_bytes(
         provider="gmail", content=combined_text.encode("utf-8"), filename=filename,
         user_id=user_id, client_token=client_token, session_id=session_id,
+        alt_client_token=alt_client_token,
     )
 
 
 async def ingest_google_chat_space(space_id: str, user_id: str, client_token: str,
-                                    session_id: str | None = None) -> dict:
+                                    session_id: str | None = None, alt_client_token: str | None = None) -> dict:
     """Ingests every message in one Google Chat space/chat as one combined
     document - sender + timestamp + text for each message, plus every
     attachment's extracted text and any linked page's scraped content -
@@ -327,17 +341,28 @@ async def ingest_google_chat_space(space_id: str, user_id: str, client_token: st
 
     combined_text = "\n".join(lines) if lines else "(empty chat/space - no messages)"
 
-    safe_name = re.sub(r"[^A-Za-z0-9 ._-]+", "", space_id).strip()[:60] or "chat"
-    filename = f"Google Chat - {safe_name}.txt"
+    # Use the space's human-readable display name in the filename, not the
+    # opaque space_id - otherwise a question like "what's in Rosotravel
+    # Internal Scrum" can never match this source by name (only a specific
+    # fact from inside it, found by plain content search, would ever
+    # surface it). Falls back to the id if the name lookup fails - ingestion
+    # still succeeds, it just won't be name-resolvable until retried.
+    try:
+        display_name = connector.get_space(space_id).get("name") or space_id
+    except Exception as e:
+        logger.warning(f"[CONNECTORS][GOOGLE_CHAT] Could not fetch space name for {space_id}: {e}")
+        display_name = space_id
+    filename = _connector_doc_filename("Google Chat", display_name, space_id)
 
     return await ingest_bytes(
         provider="google_chat", content=combined_text.encode("utf-8"), filename=filename,
         user_id=user_id, client_token=client_token, session_id=session_id,
+        alt_client_token=alt_client_token,
     )
 
 
 async def ingest_outlook_message(message_id: str, user_id: str, client_token: str,
-                                  session_id: str | None = None) -> dict:
+                                  session_id: str | None = None, alt_client_token: str | None = None) -> dict:
     """Ingests a whole Outlook email - body text plus every attachment's
     extracted text and any linked page's scraped content - as one combined
     document, mirroring ingest_gmail_message exactly (same header block
@@ -381,11 +406,12 @@ async def ingest_outlook_message(message_id: str, user_id: str, client_token: st
     return await ingest_bytes(
         provider="outlook", content=combined_text.encode("utf-8"), filename=filename,
         user_id=user_id, client_token=client_token, session_id=session_id,
+        alt_client_token=alt_client_token,
     )
 
 
 async def ingest_outlook_chat(chat_id: str, user_id: str, client_token: str,
-                               session_id: str | None = None) -> dict:
+                               session_id: str | None = None, alt_client_token: str | None = None) -> dict:
     """Ingests every message in one Outlook/Teams personal chat as one
     combined document - sender + timestamp + text per message, plus any
     linked page's scraped content - mirroring ingest_google_chat_space.
@@ -418,12 +444,19 @@ async def ingest_outlook_chat(chat_id: str, user_id: str, client_token: str,
 
     combined_text = "\n".join(lines) if lines else "(empty chat - no messages)"
 
-    safe_name = re.sub(r"[^A-Za-z0-9 ._-]+", "", chat_id).strip()[:60] or "chat"
-    filename = f"Outlook Chat - {safe_name}.txt"
+    # Same reasoning as ingest_google_chat_space above - use the chat's
+    # human-readable name/topic, not the opaque chat_id.
+    try:
+        display_name = connector.get_chat(chat_id).get("name") or chat_id
+    except Exception as e:
+        logger.warning(f"[CONNECTORS][OUTLOOK_CHAT] Could not fetch chat name for {chat_id}: {e}")
+        display_name = chat_id
+    filename = _connector_doc_filename("Outlook Chat", display_name, chat_id)
 
     return await ingest_bytes(
         provider="outlook_chat", content=combined_text.encode("utf-8"), filename=filename,
         user_id=user_id, client_token=client_token, session_id=session_id,
+        alt_client_token=alt_client_token,
     )
 
 
