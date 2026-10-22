@@ -27,10 +27,19 @@ class AzureDevOpsConnector:
                 "Missing AZURE_DEVOPS_PAT environment variable."
             )
 
+        # Azure DevOps organizations are addressable under either of two
+        # equally valid, still-supported hostnames - the newer
+        # "dev.azure.com/{org}" and the older "{org}.visualstudio.com" (many
+        # orgs created before ~2018 still use the latter and it isn't
+        # deprecated) - rejecting the second as "invalid" was a false
+        # rejection for anyone on that format.
         parsed = urlparse(org_url)
-        if parsed.scheme != "https" or parsed.hostname != "dev.azure.com":
+        host = (parsed.hostname or "")
+        valid = parsed.scheme == "https" and (host == "dev.azure.com" or host.endswith(".visualstudio.com"))
+        if not valid:
             raise AzureDevOpsError(
-                "AZURE_DEVOPS_ORG_URL must use an HTTPS dev.azure.com URL."
+                "AZURE_DEVOPS_ORG_URL must be an HTTPS URL in one of these forms: "
+                "https://dev.azure.com/{organization} or https://{organization}.visualstudio.com"
             )
 
         self.org_url = org_url
@@ -61,23 +70,42 @@ class AzureDevOpsConnector:
         if params:
             query_params.update(params)
 
-        try:
-            resp = self.session.get(url, params=query_params, timeout=25, stream=is_stream)
-        except requests.RequestException as exc:
-            raise AzureDevOpsError(f"Unable to reach Azure DevOps: {str(exc)}") from exc
+        # Observed in practice: a VALID PAT occasionally gets a one-off 2xx/3xx
+        # response whose body is an HTML sign-in page instead of the requested
+        # JSON/octet-stream (a transient edge/session hiccup, not proof the PAT
+        # is actually bad - confirmed by immediately retrying the exact same
+        # request and getting a correct 200 JSON response). So this is retried
+        # once before being treated as a real failure, instead of either
+        # crashing on resp.json() or wrongly telling the user to re-generate a
+        # perfectly good PAT.
+        for attempt in range(2):
+            try:
+                resp = self.session.get(url, params=query_params, timeout=25, stream=is_stream)
+            except requests.RequestException as exc:
+                raise AzureDevOpsError(f"Unable to reach Azure DevOps: {str(exc)}") from exc
 
-        if resp.status_code == 401:
-            raise AzureDevOpsError("Azure DevOps authentication failed. Check your PAT token.")
-        if resp.status_code == 403:
-            raise AzureDevOpsError("Azure DevOps access denied or insufficient permissions.")
-        if resp.status_code == 404:
-            raise AzureDevOpsError("Azure DevOps resource not found.")
-        if not resp.ok:
-            raise AzureDevOpsError(
-                f"Azure DevOps API returned HTTP {resp.status_code}: {resp.text}"
-            )
+            if resp.status_code == 401:
+                raise AzureDevOpsError("Azure DevOps authentication failed. Check your PAT token.")
+            if resp.status_code == 403:
+                raise AzureDevOpsError("Azure DevOps access denied or insufficient permissions.")
+            if resp.status_code == 404:
+                raise AzureDevOpsError("Azure DevOps resource not found.")
+            if not resp.ok:
+                raise AzureDevOpsError(
+                    f"Azure DevOps API returned HTTP {resp.status_code}: {resp.text}"
+                )
+            if resp.headers.get("content-type", "").startswith("text/html"):
+                if attempt == 0:
+                    resp.close()
+                    continue
+                raise AzureDevOpsError(
+                    "Azure DevOps returned a sign-in page instead of API data, twice in a row. "
+                    "This can mean the PAT is invalid/expired/revoked, or Azure DevOps is having "
+                    "a transient issue - try again, and generate a new Personal Access Token if "
+                    "it keeps happening."
+                )
 
-        return resp
+            return resp
 
     def list_projects(self) -> list[dict[str, Any]]:
         resp = self._request("_apis/projects")

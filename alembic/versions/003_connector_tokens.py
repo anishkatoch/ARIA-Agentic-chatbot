@@ -1,5 +1,5 @@
 """Add connector_tokens table - per-user OAuth token storage for the
-Gmail / Google Drive / Salesforce connectors (CONNECTOR_POC integration).
+Gmail / Google Drive connectors (CONNECTOR_POC integration).
 
 Revision ID: 003
 Revises: 002

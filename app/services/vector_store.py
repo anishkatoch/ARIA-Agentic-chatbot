@@ -41,6 +41,13 @@ def get_embeddings():
     for try_fn in [primary, *fallbacks]:
         embeddings = try_fn()
         if embeddings:
+            provider_name = next((n for n, fn in _PROVIDERS.items() if fn is try_fn), "unknown")
+            # Wraps whichever provider was actually selected so a LIVE
+            # embed_documents/embed_query call failing mid-ingest (not just
+            # unavailable at startup - e.g. HuggingFace/Voyage returning a
+            # 503 or running out of quota partway through a batch) also
+            # falls back to OpenAI, not only the one-time provider pick above.
+            wrapped = _ResilientEmbeddings(embeddings, provider_name)
             # Only cache the primary provider. If it's temporarily down and a
             # fallback had to be used instead, don't cache that fallback -
             # otherwise it would stick for the rest of the process's life
@@ -48,9 +55,73 @@ def get_embeddings():
             # its payment method issue is fixed), defeating the whole point
             # of _DynamicVoyageEmbeddings' auto-recovery design.
             if try_fn is primary:
-                _embeddings_cache = embeddings
-            return embeddings
+                _embeddings_cache = wrapped
+            return wrapped
     return None
+
+
+class _ResilientEmbeddings(Embeddings):
+    """Wraps whichever embedding provider get_embeddings() selected and
+    transparently falls back to OpenAI's small text-embedding model
+    (cfg.openai_embed_model, default "text-embedding-3-small") if a live
+    embed_documents/embed_query call fails - e.g. the HuggingFace Inference
+    API or Voyage API being temporarily down, rate-limited, or out of quota
+    mid-ingest, which the one-time provider selection in get_embeddings()
+    above can't catch since it only probes availability once at startup.
+
+    The fallback is constructed with OpenAI's native `dimensions` parameter
+    set to cfg.embedding_dim (the primary provider's configured dimension),
+    so a fallback vector stays dimensionally compatible with whatever's
+    already stored in this session's collection - without this, a partial
+    fallback mid-batch would corrupt the collection (most vector stores
+    reject mismatched-width vectors outright, but a successful Chroma/
+    pgvector write of the wrong width would silently break future
+    similarity search instead).
+
+    Only engages when OPENAI_API_KEY is configured and the primary isn't
+    already OpenAI (nothing meaningful to fall back to in that case)."""
+
+    def __init__(self, primary: Embeddings, primary_name: str):
+        self._primary = primary
+        self._primary_name = primary_name
+        self._fallback: Embeddings | None = None
+
+    def _get_fallback(self) -> Embeddings | None:
+        if self._primary_name == "openai" or not cfg.openai_api_key:
+            return None
+        if self._fallback is None:
+            self._fallback = OpenAIEmbeddings(
+                model=cfg.openai_embed_model,
+                openai_api_key=cfg.openai_api_key,
+                dimensions=cfg.embedding_dim,
+            )
+        return self._fallback
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        try:
+            return self._primary.embed_documents(texts)
+        except Exception as e:
+            fallback = self._get_fallback()
+            if fallback is None:
+                raise
+            logger.warning(
+                f"[EMBED] {self._primary_name} embed_documents failed ({e}) - "
+                f"falling back to OpenAI {cfg.openai_embed_model}"
+            )
+            return fallback.embed_documents(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        try:
+            return self._primary.embed_query(text)
+        except Exception as e:
+            fallback = self._get_fallback()
+            if fallback is None:
+                raise
+            logger.warning(
+                f"[EMBED] {self._primary_name} embed_query failed ({e}) - "
+                f"falling back to OpenAI {cfg.openai_embed_model}"
+            )
+            return fallback.embed_query(text)
 
 
 def _try_bge():
@@ -223,3 +294,56 @@ def get_vector_store(session_id: str):
     )
     logger.info(f"[STORE] Using ChromaDB (local) - collection={collection}")
     return store
+
+
+def delete_vectors_by_source(store, filename: str) -> int:
+    """Removes every chunk tagged with metadata source==filename (matched
+    case-insensitively - see below) from this session's vector store - used
+    when a user detaches a document from a chat (see app.routers.upload's
+    DELETE /upload/session-documents).
+
+    Matching is case-insensitive because the `documents` table stores
+    filenames lowercased (see Document.filename's comment in app/models/db.py
+    and every _insert_pending()/filename.lower() call site), but the vector
+    chunks' "source" metadata is tagged with the filename in its original
+    upload case - comparing exactly would silently leave orphaned chunks
+    behind for any mixed-case filename.
+
+    Chroma has no case-insensitive filter in its own "where" query language,
+    so this fetches all chunks' metadata and filters in Python instead -
+    O(n) in collection size, but this only runs on an explicit user "detach"
+    click, not a hot path. PGVector's public .delete() only accepts explicit
+    ids (no metadata filter at all, checked against the installed
+    langchain_postgres version), so this runs a raw SQL delete against its
+    underlying langchain_pg_embedding/langchain_pg_collection tables instead -
+    stable, documented table/column names that have been consistent across
+    langchain_postgres versions, unlike undocumented internal attributes."""
+    target = filename.lower()
+
+    if hasattr(store, "_collection"):
+        data = store._collection.get(include=["metadatas"])
+        ids = [
+            id_ for id_, meta in zip(data.get("ids", []), data.get("metadatas", []))
+            if (meta or {}).get("source", "").lower() == target
+        ]
+        if ids:
+            store._collection.delete(ids=ids)
+        return len(ids)
+
+    collection_name = getattr(store, "collection_name", None)
+    if not collection_name:
+        logger.warning(f"[STORE] delete_vectors_by_source: couldn't resolve collection name for {filename}")
+        return 0
+
+    from sqlalchemy import text
+    with _get_db_engine().begin() as conn:
+        result = conn.execute(
+            text(
+                "DELETE FROM langchain_pg_embedding e "
+                "USING langchain_pg_collection c "
+                "WHERE e.collection_id = c.uuid AND c.name = :collection "
+                "AND LOWER(e.cmetadata->>'source') = :filename"
+            ),
+            {"collection": collection_name, "filename": target},
+        )
+        return result.rowcount

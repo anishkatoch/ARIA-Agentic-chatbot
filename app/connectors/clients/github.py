@@ -8,6 +8,8 @@ import urllib.request
 
 from fastapi import HTTPException
 
+from app.connectors.clients._errors import extract_http_error_detail
+
 
 API_BASE = "https://api.github.com"
 API_VERSION = "2022-11-28"
@@ -64,18 +66,19 @@ class GitHubConnector:
             with urllib.request.urlopen(request, timeout=20) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
+            detail = extract_http_error_detail(exc)
             if exc.code == 404:
                 raise HTTPException(404, "GitHub resource not found or inaccessible")
             if exc.code == 401:
-                raise HTTPException(401, "GitHub authentication failed - check GITHUB_TOKEN")
+                suffix = f" ({detail})" if detail else ""
+                raise HTTPException(401, f"GitHub authentication failed - check GITHUB_TOKEN{suffix}")
             if exc.code == 403:
-                raise HTTPException(
-                    403,
-                    "GitHub access denied or API rate limit reached",
-                )
+                suffix = f": {detail}" if detail else ""
+                raise HTTPException(403, f"GitHub access denied or API rate limit reached{suffix}")
             if exc.code == 429:
                 raise HTTPException(429, "GitHub API rate limit reached")
-            raise HTTPException(502, f"GitHub API returned HTTP {exc.code}")
+            suffix = f": {detail}" if detail else ""
+            raise HTTPException(502, f"GitHub API returned HTTP {exc.code}{suffix}")
         except (urllib.error.URLError, TimeoutError):
             raise HTTPException(502, "Unable to reach GitHub API")
         except (UnicodeDecodeError, json.JSONDecodeError):

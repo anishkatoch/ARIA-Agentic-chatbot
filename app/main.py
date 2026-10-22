@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 from app.core.logging_config import setup_logging
-from app.routers import chat, upload, auth as auth_router
+from app.routers import chat, upload, auth as auth_router, admin as admin_router, knowledge_base
 from app.connectors import router as connectors_router
 from app.services import auth_service
 
@@ -25,16 +25,25 @@ _STATIC_DIR  = os.path.join(os.path.dirname(__file__), "static")
 _SAMPLE_FILE = os.path.join(os.path.dirname(__file__), "data", "sample-ai-overview.txt")
 
 # Routes that do NOT require authentication
-# The 3 OAuth callback paths are here (not under /connectors/) because the
-# browser lands on them directly from Google/Salesforce's redirect with no
+# The OAuth callback paths are here (not under /connectors/) because the
+# browser lands on them directly from Google's/Microsoft's redirect with no
 # Authorization header - they can't be gated behind Bearer auth. They must
-# match GOOGLE_REDIRECT_URI / GOOGLE_DRIVE_REDIRECT_URI / SALESFORCE_REDIRECT_URI.
+# match GOOGLE_REDIRECT_URI / GOOGLE_DRIVE_REDIRECT_URI / OUTLOOK_REDIRECT_URI.
+# (Google Chat and Outlook Chat have no callback of their own - they share
+# the Gmail/Outlook token via mirroring in gmail_callback/outlook_callback.)
 _PUBLIC_PREFIXES = (
     "/auth", "/health", "/auth.html", "/auth.css", "/auth.js",
-    "/gmail/callback", "/google-drive/callback", "/salesforce/callback",
+    "/gmail/callback", "/google-drive/callback", "/outlook/callback",
     "/privacy", "/terms",
+    "/admin.html", "/admin.css", "/admin.js",
 )
-_PROTECTED_PREFIXES = ("/chat/", "/upload/", "/connectors/")
+_PROTECTED_PREFIXES = ("/chat/", "/upload/", "/connectors/", "/knowledge-bases")
+
+# Routes under here require a token whose decoded role == "admin" - stricter
+# than _PROTECTED_PREFIXES, which just requires any logged-in user.
+# /auth/admin-login itself is public (it's how an admin token is obtained),
+# handled by the "/auth" entry in _PUBLIC_PREFIXES above.
+_ADMIN_PREFIXES = ("/admin/",)
 
 
 async def _seed_default_session():
@@ -176,8 +185,22 @@ app = FastAPI(
 async def auth_middleware(request: Request, call_next):
     path = request.url.path
 
+    # Admin API routes need a token with role == "admin", not just any
+    # logged-in user - checked before the generic protected-prefix block.
+    if any(path.startswith(p) for p in _ADMIN_PREFIXES):
+        auth_header = request.headers.get("Authorization", "")
+        token = auth_header[7:] if auth_header.startswith("Bearer ") else None
+        if not token:
+            return JSONResponse({"detail": "Admin authentication required"}, status_code=401)
+        user = auth_service.verify_token(token)
+        if not user:
+            return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
+        if user.get("role") != "admin":
+            return JSONResponse({"detail": "Admin access required"}, status_code=403)
+        request.state.user = user
+
     # Only enforce auth on protected API routes
-    if any(path.startswith(p) for p in _PROTECTED_PREFIXES):
+    elif any(path.startswith(p) for p in _PROTECTED_PREFIXES):
         auth_header = request.headers.get("Authorization", "")
         token = auth_header[7:] if auth_header.startswith("Bearer ") else None
         if not token:
@@ -205,6 +228,8 @@ async def auth_middleware(request: Request, call_next):
 app.include_router(auth_router.router)
 app.include_router(upload.router)
 app.include_router(chat.router)
+app.include_router(admin_router.router)
+app.include_router(knowledge_base.router)
 app.include_router(connectors_router.router)
 app.include_router(connectors_router.unlock_router)
 app.include_router(connectors_router.oauth_callback_router)
@@ -224,6 +249,13 @@ def health():
 @app.get("/auth.html")
 def serve_auth():
     return FileResponse(os.path.join(_STATIC_DIR, "auth.html"))
+
+
+# Serve admin.html explicitly, same reason - the login page for the single
+# fixed admin account must be reachable with no token.
+@app.get("/admin.html")
+def serve_admin():
+    return FileResponse(os.path.join(_STATIC_DIR, "admin.html"))
 
 
 # Public Privacy Policy / Terms of Service pages - also what Google/Microsoft's

@@ -52,8 +52,8 @@
       <strong>Plain-language notice:</strong> this page describes, honestly and specifically, what ARIA actually
       does with your data based on how it's built. It is a starting point for transparency with your users, not a
       substitute for review by a qualified lawyer before this application is used commercially or at scale -
-      especially given it can connect to real third-party accounts (Gmail, Google Drive, GitHub, Jira, ServiceNow,
-      Salesforce, SharePoint, Microsoft Teams, Azure DevOps).
+      especially given it can connect to real third-party accounts (Gmail, Google Drive, Google Chat,
+      Outlook, Outlook Chat, GitHub, SharePoint, Microsoft Teams, Azure DevOps).
     </div>
 
     <h2>1. Who this applies to</h2>
@@ -80,11 +80,13 @@
       response - not for their own unrelated use beyond their standard provider terms.</p>
 
     <h2>4. Connecting third-party source systems</h2>
-    <p>ARIA can optionally connect to Gmail, Google Drive, GitHub, Jira, ServiceNow, Salesforce, SharePoint,
-      Microsoft Teams, and Azure DevOps so you can pull a file or record in and chat with it. If you use this:</p>
+    <p>ARIA can optionally connect to Gmail, Google Drive, Google Chat, Outlook, Outlook Chat, GitHub,
+      SharePoint, Microsoft Teams, and Azure DevOps so you can pull a file, email, or chat in and chat with it. If you use this:</p>
     <ul>
-      <li>For accounts you authorize via OAuth (Gmail, Google Drive, Salesforce), we store an access/refresh token
-        tied specifically to <strong>your</strong> user account - never shared with other users of this app.</li>
+      <li>For accounts you authorize via OAuth (Gmail, Google Drive, Google Chat, Outlook, Outlook Chat), we store
+        an access/refresh token tied specifically to <strong>your</strong> user account - never shared with other
+        users of this app. Gmail+Google Chat share one Google sign-in, and Outlook+Outlook Chat share one
+        Microsoft sign-in - connecting or disconnecting either half of a pair does both together.</li>
       <li>We only fetch what you explicitly browse and select in the app - we do not run background jobs that read
         your entire mailbox, drive, or repositories without your action.</li>
       <li>This feature sits behind an additional access key, separate from your normal login, specifically because

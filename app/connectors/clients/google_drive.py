@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
 
 from app.connectors import token_store
+from app.connectors.clients._errors import extract_http_error_detail
 from app.connectors.clients.oauth2_token_client import OAuth2TokenClient
 
 AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -144,13 +145,17 @@ class GoogleDriveConnector:
             with urllib.request.urlopen(req, timeout=20) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
+            detail = extract_http_error_detail(exc)
             if exc.code == 401:
-                raise HTTPException(401, "Google Drive access token is invalid or expired")
+                suffix = f" ({detail})" if detail else ""
+                raise HTTPException(401, f"Google Drive access token is invalid or expired{suffix}")
             if exc.code == 403:
-                raise HTTPException(403, "Google Drive API access denied or insufficient permissions")
+                suffix = f": {detail}" if detail else ""
+                raise HTTPException(403, f"Google Drive API access denied or insufficient permissions{suffix}")
             if exc.code == 404:
                 raise HTTPException(404, "Google Drive resource not found")
-            raise HTTPException(502, f"Google Drive API error: HTTP {exc.code}")
+            suffix = f": {detail}" if detail else ""
+            raise HTTPException(502, f"Google Drive API error: HTTP {exc.code}{suffix}")
         except Exception as exc:
             raise HTTPException(502, f"Unable to reach Google Drive API: {str(exc)}")
 
@@ -297,13 +302,17 @@ class GoogleDriveConnector:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 content = resp.read()
         except urllib.error.HTTPError as exc:
+            detail = extract_http_error_detail(exc)
             if exc.code == 401:
-                raise HTTPException(401, "Google Drive access token is invalid or expired")
+                suffix = f" ({detail})" if detail else ""
+                raise HTTPException(401, f"Google Drive access token is invalid or expired{suffix}")
             if exc.code == 403:
-                raise HTTPException(403, "Google Drive API access denied or file cannot be downloaded")
+                suffix = f": {detail}" if detail else ""
+                raise HTTPException(403, f"Google Drive API access denied or file cannot be downloaded{suffix}")
             if exc.code == 404:
                 raise HTTPException(404, "Google Drive file not found")
-            raise HTTPException(502, f"Google Drive API error: HTTP {exc.code}")
+            suffix = f": {detail}" if detail else ""
+            raise HTTPException(502, f"Google Drive API error: HTTP {exc.code}{suffix}")
         except Exception as exc:
             raise HTTPException(502, f"Unable to download file from Google Drive: {str(exc)}")
 

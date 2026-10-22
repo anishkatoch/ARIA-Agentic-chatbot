@@ -3,6 +3,9 @@ import logging
 import os
 import tempfile
 import time
+import zipfile
+from io import BytesIO
+
 import httpx
 from liteparse import LiteParse
 from playwright.async_api import async_playwright
@@ -13,6 +16,14 @@ logger = logging.getLogger(__name__)
 
 _parser = LiteParse()
 _docling_converter = None
+
+# Source/code and other plain-text-like extensions - read as raw UTF-8 text
+# and chunked like .txt/.md, no layout parsing needed.
+PLAIN_TEXT_EXTENSIONS = {
+    ".txt", ".md", ".py", ".json", ".html", ".htm", ".js", ".ts", ".jsx", ".tsx",
+    ".yaml", ".yml", ".xml", ".css", ".java", ".c", ".cpp", ".h", ".go", ".rb",
+    ".php", ".sh", ".sql", ".ini", ".cfg", ".log", ".toml",
+}
 
 
 def _avg_confidence(page) -> float | None:
@@ -79,13 +90,73 @@ def _parse_with_docling(tmp_path: str) -> tuple[str, list[dict]]:
     return full_text, page_spans
 
 
+async def _parse_zip(content: bytes, filename: str) -> tuple[str, list[dict]]:
+    """Extracts every entry in the zip and parses each one through
+    parse_file() recursively, concatenating the results with a per-file
+    header so the combined text reads as one document but still lets the
+    user ask about any individual file inside by name. Entries with a
+    completely unparseable type are noted and skipped rather than failing
+    the whole zip, same policy as a Gmail attachment that fails to parse."""
+    full_text = ""
+    page_spans: list[dict] = []
+
+    max_entry_bytes = cfg.max_file_size_mb * 1024 * 1024
+
+    def _read_entries() -> list[tuple[str, bytes]]:
+        with zipfile.ZipFile(BytesIO(content)) as zf:
+            infos = [i for i in zf.infolist() if not i.filename.endswith("/")][:cfg.zip_max_entries]
+            entries = []
+            for info in infos:
+                # Guard against a decompression-bomb entry (tiny compressed
+                # size, huge uncompressed size) before reading it into memory.
+                if info.file_size > max_entry_bytes:
+                    entries.append((info.filename, None))
+                    continue
+                entries.append((info.filename, zf.read(info)))
+            return entries
+
+    try:
+        entries = await asyncio.to_thread(_read_entries)
+    except Exception as e:
+        raise RuntimeError(f"Failed to open {filename} as a zip archive: {e}") from e
+
+    if not entries:
+        raise ValueError(f"{filename} is an empty zip archive")
+
+    for entry_name, entry_content in entries:
+        try:
+            if entry_content is None:
+                raise ValueError(f"exceeds {cfg.max_file_size_mb} MB per-file limit, skipped")
+            entry_text, _ = await parse_file(entry_content, entry_name)
+        except Exception as e:
+            logger.warning(f"[PARSE][ZIP] {filename} -> could not parse entry {entry_name}: {e}")
+            entry_text = f"(could not extract text from this file: {e})"
+
+        start = len(full_text)
+        section = f"--- File: {entry_name} ---\n{entry_text}\n"
+        full_text += section
+        page_spans.append({
+            "page_number": len(page_spans) + 1,
+            "start": start,
+            "end": start + len(section),
+            "confidence": None,
+        })
+
+    return full_text, page_spans
+
+
 async def parse_file(content: bytes, filename: str) -> tuple[str, list[dict]]:
     ext = os.path.splitext(filename)[1].lower()
     size_kb = len(content) / 1024
     logger.info(f"[PARSE] Starting - file={filename}, size={size_kb:.1f} KB, type={ext}")
     t0 = time.time()
 
-    if ext in (".txt", ".md"):
+    if ext == ".zip":
+        full_text, page_spans = await _parse_zip(content, filename)
+        logger.info(f"[PARSE] Done (zip) - entries={len(page_spans)}, chars={len(full_text)}, time={time.time()-t0:.2f}s")
+        return full_text, page_spans
+
+    if ext in PLAIN_TEXT_EXTENSIONS:
         text = content.decode("utf-8", errors="ignore")
         logger.info(f"[PARSE] Done (plain text) - chars={len(text)}, time={time.time()-t0:.2f}s")
         page_spans = [{"page_number": 1, "start": 0, "end": len(text), "confidence": None}]

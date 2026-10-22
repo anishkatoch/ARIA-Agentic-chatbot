@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
 
 from app.connectors import token_store
+from app.connectors.clients._errors import extract_http_error_detail
 from app.connectors.clients.oauth2_token_client import OAuth2TokenClient
 
 AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -18,6 +19,14 @@ GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/userinfo.email",
+    # Google Chat shares this exact OAuth grant - see app/connectors/clients/
+    # google_chat.py and router.py's gmail_callback, which mirrors the token
+    # this flow produces into a second "google_chat" token row so connecting
+    # Gmail connects Chat too, with no separate consent screen. Requires the
+    # Google Chat API to be enabled on the Google Cloud project this app's
+    # GOOGLE_CLIENT_ID/SECRET belong to.
+    "https://www.googleapis.com/auth/chat.spaces.readonly",
+    "https://www.googleapis.com/auth/chat.messages.readonly",
 ]
 
 PROVIDER = "gmail"
@@ -152,13 +161,17 @@ class GmailConnector:
             with urllib.request.urlopen(req, timeout=20) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
+            detail = extract_http_error_detail(exc)
             if exc.code == 401:
-                raise HTTPException(401, "Gmail access token is invalid or expired")
+                suffix = f" ({detail})" if detail else ""
+                raise HTTPException(401, f"Gmail access token is invalid or expired{suffix}")
             if exc.code == 403:
-                raise HTTPException(403, "Gmail API access denied or insufficient permissions")
+                suffix = f": {detail}" if detail else ""
+                raise HTTPException(403, f"Gmail API access denied or insufficient permissions{suffix}")
             if exc.code == 404:
                 raise HTTPException(404, "Gmail resource not found")
-            raise HTTPException(502, f"Gmail API error: HTTP {exc.code}")
+            suffix = f": {detail}" if detail else ""
+            raise HTTPException(502, f"Gmail API error: HTTP {exc.code}{suffix}")
         except Exception as exc:
             raise HTTPException(502, f"Unable to reach Gmail API: {str(exc)}")
 
@@ -177,12 +190,15 @@ class GmailConnector:
         except HTTPException as e:
             return {"authenticated": False, "detail": e.detail}
 
-    def list_messages(self, max_results: int = 10, q: str = "", page_token: str = "") -> dict:
+    def list_messages(self, max_results: int = 10, q: str = "", page_token: str = "",
+                       label_ids: list[str] | None = None) -> dict:
         params = {"maxResults": min(max(max_results, 1), 50)}
         if q:
             params["q"] = q
         if page_token:
             params["pageToken"] = page_token
+        if label_ids:
+            params["labelIds"] = label_ids
 
         raw = self._api_request("/messages", params)
         message_summaries = raw.get("messages", [])
@@ -197,7 +213,7 @@ class GmailConnector:
             try:
                 details = self._api_request(
                     f"/messages/{msg_id}",
-                    {"format": "metadata", "metadataHeaders": ["Subject", "From", "Date", "To"]},
+                    {"format": "metadata", "metadataHeaders": ["Subject", "From", "Date", "To", "Cc"]},
                     token=token,
                 )
                 headers = {
@@ -210,6 +226,7 @@ class GmailConnector:
                     "subject": headers.get("subject", "(No Subject)"),
                     "from": headers.get("from", ""),
                     "to": headers.get("to", ""),
+                    "cc": headers.get("cc", ""),
                     "date": headers.get("date", ""),
                     "snippet": details.get("snippet", ""),
                 }
@@ -226,6 +243,37 @@ class GmailConnector:
             "result_size_estimate": raw.get("resultSizeEstimate", len(items)),
             "next_page_token": raw.get("nextPageToken"),
         }
+
+    def list_message_ids(self, label_ids: list[str] | None = None, q: str = "",
+                          limit: int | None = None) -> list[str]:
+        """Paginate through the Gmail list API collecting message ids only
+        (no per-message detail fetch) - used for bulk ingestion ("select all"
+        / "latest N") where we may need hundreds of ids and don't want to pay
+        for metadata we're about to re-fetch in full during ingestion anyway.
+        Gmail returns newest-first by default, so `limit` naturally yields the
+        N most recent matches."""
+        ids: list[str] = []
+        page_token = ""
+        while True:
+            params = {"maxResults": 500}
+            if label_ids:
+                params["labelIds"] = label_ids
+            if q:
+                params["q"] = q
+            if page_token:
+                params["pageToken"] = page_token
+
+            raw = self._api_request("/messages", params)
+            batch = raw.get("messages", [])
+            ids.extend(m["id"] for m in batch)
+
+            if limit and len(ids) >= limit:
+                return ids[:limit]
+
+            page_token = raw.get("nextPageToken")
+            if not page_token or not batch:
+                break
+        return ids
 
     def get_message(self, message_id: str) -> dict:
         raw = self._api_request(f"/messages/{message_id}", {"format": "full"})
@@ -271,6 +319,7 @@ class GmailConnector:
             "subject": headers.get("subject", "(No Subject)"),
             "from": headers.get("from", ""),
             "to": headers.get("to", ""),
+            "cc": headers.get("cc", ""),
             "date": headers.get("date", ""),
             "snippet": raw.get("snippet", ""),
             "body_text": body_text or raw.get("snippet", ""),

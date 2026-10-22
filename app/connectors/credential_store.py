@@ -1,14 +1,14 @@
-"""Per-user override credentials for API-key-style connectors (GitHub, Jira,
-ServiceNow, Azure DevOps), backed by the `connector_credentials` table.
+"""Per-user override credentials for API-key-style connectors (GitHub,
+Azure DevOps), backed by the `connector_credentials` table.
 
 Lets one user "bring their own key" for a connector that otherwise only
 reads a single shared app-level env var - their row takes priority for their
 own requests only; every other user still gets the env var default (or stays
 unconfigured if there isn't one, with no env var touched or server restart
 needed). Distinct from token_store.py (OAuth access/refresh tokens for
-Gmail/Google Drive/Salesforce); this one stores an opaque JSON blob per
+Gmail/Google Drive); this one stores an opaque JSON blob per
 provider since each one's credential shape differs (e.g. GitHub needs just a
-token, Jira needs a base_url + email + token).
+token, Azure DevOps needs an org_url + PAT).
 
 Follows the same DB-session calling convention as token_store.py.
 """

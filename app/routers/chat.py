@@ -26,16 +26,38 @@ async def chat(
         f"question='{request.question[:80]}{'...' if len(request.question) > 80 else ''}'"
     )
     try:
-        session_id = str(request.session_id)
-        # Fall back to the sample session if the user hasn't uploaded anything yet
-        if not session_has_data(session_id):
-            session_id = DEFAULT_SESSION_ID
-            logger.info(f"[CHAT] No data in session - using default sample session")
+        if request.knowledge_base_id is not None:
+            from app.db.session import get_session_factory
+            from app.models.db import KnowledgeBase
+
+            factory = get_session_factory()
+            if factory is None:
+                raise HTTPException(503, "Database unavailable")
+            db = factory()
+            try:
+                kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == request.knowledge_base_id).first()
+            finally:
+                db.close()
+            if not kb or kb.status != "active":
+                raise HTTPException(400, "Knowledge base not found or inactive")
+            session_id = kb.session_id
+            logger.info(f"[CHAT] Using knowledge base '{kb.name}' ({kb.id})")
+        else:
+            session_id = str(request.session_id)
+            # Fall back to the sample session if the user hasn't uploaded anything yet
+            if not session_has_data(session_id):
+                session_id = DEFAULT_SESSION_ID
+                logger.info(f"[CHAT] No data in session - using default sample session")
         vector_store = get_vector_store(session_id)
+        # session_id here must match the vectorstore actually being queried
+        # (the KB's session when one is selected, not the caller's own
+        # session_id) - it's the cache key for BM25/graph retrieval and the
+        # response cache, so passing a mismatched id serves stale/empty
+        # results built for a different store entirely.
         answer, elapsed_ms, citations = answer_question(
             vectorstore=vector_store,
             question=request.question,
-            session_id=str(request.session_id),
+            session_id=session_id,
             advanced=advanced,
             thinking=thinking,
         )
@@ -46,6 +68,8 @@ async def chat(
             elapsed_ms=elapsed_ms,
             citations=citations,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"[CHAT] Error - session={request.session_id}, error={e}", exc_info=True)
         raise HTTPException(500, "An error occurred processing your question. Please try again.")

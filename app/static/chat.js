@@ -20,6 +20,9 @@ const state = {
   connectorsLoaded: false,
   connectors:   [],
   connectorsUnlockToken: null,
+  selectedKnowledgeBaseId: null,
+  knowledgeBases: [],
+  activeSidebarPanel: 'upload',
 };
 window._ragState = state; // expose for testing
 
@@ -35,9 +38,298 @@ document.addEventListener('DOMContentLoaded', () => {
   setupFileInput();
   setupHeadersToggle();
   checkOAuthReturn();
+  restoreSession();
 });
 
-// The OAuth callback (gmail/google-drive/salesforce) redirects back here
+/* ── Sidebar nav - opens the side drawer on whichever panel was clicked ───
+   The drawer overlays the chat area (like Claude Code's own side panels)
+   instead of the panel content being squeezed inline below the rail icons.
+   Clicking the already-open panel's icon again closes the drawer. */
+const SIDEBAR_PANELS = {
+  upload:     { id: 'upload-section',     title: 'Upload a Document', wide: false },
+  connectors: { id: 'connectors-section', title: 'Connect a Source',  wide: true },
+  knowledge:  { id: 'knowledge-section',  title: 'Knowledge Base',    wide: true },
+  settings:   { id: 'settings-section',   title: 'Settings',          wide: true },
+};
+
+function showSidebarPanel(name) {
+  const drawer = document.getElementById('side-drawer');
+  const alreadyOpenOnThis = !drawer.classList.contains('hidden') && state.activeSidebarPanel === name;
+  if (alreadyOpenOnThis) {
+    closeSidebarDrawer();
+    return;
+  }
+
+  Object.entries(SIDEBAR_PANELS).forEach(([key, cfg]) => {
+    document.getElementById(cfg.id).classList.toggle('hidden', key !== name);
+  });
+  document.querySelectorAll('.sidebar-nav-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.panel === name);
+  });
+  document.getElementById('side-drawer-title').textContent = SIDEBAR_PANELS[name].title;
+  drawer.classList.toggle('side-drawer--wide', !!SIDEBAR_PANELS[name].wide);
+  // "Process & Chat" only applies to the Upload tab's staged files - picking
+  // a connector item ingests immediately on click, and knowledge base /
+  // settings panels have nothing to "process" at all. Showing it there was
+  // a dead button that looked broken when clicked.
+  document.getElementById('process-btn').classList.toggle('hidden', name !== 'upload');
+
+  drawer.classList.remove('hidden');
+  state.activeSidebarPanel = name;
+
+  if (name === 'connectors') {
+    if (!state.connectorsUnlockToken) {
+      showConnectorsUnlockPrompt();
+    } else if (!state.connectorsLoaded) {
+      state.connectorsLoaded = true;
+      loadConnectors();
+    }
+  } else if (name === 'knowledge') {
+    // Always refetch (not just the first time) - an admin can add a new
+    // knowledge base or finish processing files into one at any point while
+    // this tab is already open, and a one-time-only load would keep showing
+    // the stale list until the page is hard-refreshed.
+    loadKnowledgeBases();
+  }
+}
+
+/* ── "Which documents are attached" popover (session badge) ─────── */
+async function toggleAttachedDocsPopover(evt) {
+  if (evt) evt.stopPropagation();
+  const pop = document.getElementById('attached-docs-popover');
+  const opening = pop.classList.contains('hidden');
+  if (!opening) { pop.classList.add('hidden'); return; }
+
+  pop.classList.remove('hidden');
+  const list = document.getElementById('attached-docs-list');
+  list.innerHTML = '<div class="attached-docs-empty">Loading…</div>';
+
+  try {
+    let docs = [];
+    if (state.selectedKnowledgeBaseId) {
+      const res = await fetch(`/knowledge-bases/${state.selectedKnowledgeBaseId}/files`, { headers: authHeaders() });
+      if (res.ok) docs = await res.json();
+    } else if (state.sessionId) {
+      const res = await fetch(`/upload/session-documents?session_id=${encodeURIComponent(state.sessionId)}`, { headers: authHeaders() });
+      if (res.ok) docs = await res.json();
+    }
+    list.innerHTML = docs.length
+      ? docs.map(d => `<div class="attached-docs-row">${escHtml(d.filename)}</div>`).join('')
+      : '<div class="attached-docs-empty">No documents attached yet.</div>';
+  } catch (e) {
+    list.innerHTML = '<div class="attached-docs-empty">Couldn\'t load the document list.</div>';
+  }
+}
+
+document.addEventListener('click', (evt) => {
+  const pop = document.getElementById('attached-docs-popover');
+  const badge = document.getElementById('session-badge');
+  if (pop && !pop.classList.contains('hidden') && badge && !badge.contains(evt.target)) {
+    pop.classList.add('hidden');
+  }
+});
+
+/* ── Composer "+" menu (quick attach, right next to the message box) ── */
+function toggleComposerMenu(evt) {
+  if (evt) evt.stopPropagation();
+  const menu = document.getElementById('composer-menu');
+  const btn = document.getElementById('composer-plus-btn');
+  const opening = menu.classList.contains('hidden');
+  menu.classList.toggle('hidden', !opening);
+  btn.classList.toggle('active', opening);
+}
+
+function composerMenuAction(panel) {
+  document.getElementById('composer-menu').classList.add('hidden');
+  document.getElementById('composer-plus-btn').classList.remove('active');
+  showSidebarPanel(panel);
+}
+
+// "Add URL" opens the Upload panel straight on its URL tab - that tab no
+// longer has its own button in the Files/API bar since it's reached from
+// here instead.
+function composerAddUrl() {
+  document.getElementById('composer-menu').classList.add('hidden');
+  document.getElementById('composer-plus-btn').classList.remove('active');
+  showSidebarPanel('upload');
+  switchUploadTab('url');
+}
+
+document.addEventListener('click', (evt) => {
+  const menu = document.getElementById('composer-menu');
+  const attach = document.querySelector('.composer-attach');
+  if (menu && !menu.classList.contains('hidden') && attach && !attach.contains(evt.target)) {
+    menu.classList.add('hidden');
+    document.getElementById('composer-plus-btn').classList.remove('active');
+  }
+});
+
+/* ── Composer attachments popover (paperclip, next to the "+" button) ──
+   Lets the user see every document attached to the CURRENT chat and
+   detach ("x") any one of them, unlike the read-only header badge popover
+   (toggleAttachedDocsPopover above). */
+async function toggleComposerAttachmentsPopover(evt) {
+  if (evt) evt.stopPropagation();
+  const pop = document.getElementById('composer-attachments-popover');
+  const opening = pop.classList.contains('hidden');
+  if (!opening) { pop.classList.add('hidden'); return; }
+  pop.classList.remove('hidden');
+  await loadComposerAttachments();
+}
+
+async function loadComposerAttachments() {
+  const list = document.getElementById('composer-attachments-list');
+  list.innerHTML = '<div class="attached-docs-empty">Loading…</div>';
+
+  // A knowledge base (admin-curated, shared) was still falling through to
+  // the "no documents attached" empty state here, even though it's exactly
+  // what the chat is actually answering from - this popover only ever
+  // checked state.sessionId, never state.selectedKnowledgeBaseId (unlike
+  // the other attached-docs popover, toggleAttachedDocsPopover, which
+  // already handled both cases).
+  if (state.selectedKnowledgeBaseId) {
+    try {
+      const res = await fetch(`/knowledge-bases/${state.selectedKnowledgeBaseId}/files`, { headers: authHeaders() });
+      const docs = res.ok ? await res.json() : [];
+      // Shared KB documents aren't removable by the user here - no "x" button.
+      list.innerHTML = docs.length
+        ? docs.map(d => `<div class="attached-docs-row">${escHtml(d.filename)}</div>`).join('')
+        : '<div class="attached-docs-empty">No documents in this knowledge base yet.</div>';
+    } catch (e) {
+      list.innerHTML = '<div class="attached-docs-empty">Couldn\'t load the document list.</div>';
+    }
+    return;
+  }
+
+  if (!state.sessionId) {
+    list.innerHTML = '<div class="attached-docs-empty">No documents attached yet.</div>';
+    return;
+  }
+  try {
+    const res = await fetch(`/upload/session-documents?session_id=${encodeURIComponent(state.sessionId)}`, { headers: authHeaders() });
+    const docs = res.ok ? await res.json() : [];
+    list.innerHTML = docs.length
+      ? docs.map(d => `
+          <div class="attached-docs-row attached-docs-row--removable">
+            <span class="attached-docs-name">${escHtml(d.filename)}</span>
+            <button class="attached-docs-remove" onclick="detachSessionDocument('${escAttr(d.filename)}')"
+                    title="Remove from this chat" aria-label="Remove ${escAttr(d.filename)}">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>`).join('')
+      : '<div class="attached-docs-empty">No documents attached yet.</div>';
+  } catch (e) {
+    list.innerHTML = '<div class="attached-docs-empty">Couldn\'t load the document list.</div>';
+  }
+}
+
+async function detachSessionDocument(filename) {
+  if (!state.sessionId) return;
+  try {
+    const params = new URLSearchParams({ session_id: state.sessionId, filename });
+    const res = await fetch(`/upload/session-documents?${params}`, { method: 'DELETE', headers: authHeaders() });
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
+    toast(`${filename} removed from this chat`, 'success');
+    await loadComposerAttachments();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+document.addEventListener('click', (evt) => {
+  const pop = document.getElementById('composer-attachments-popover');
+  const btn = document.getElementById('composer-attachments-btn');
+  if (pop && !pop.classList.contains('hidden') && btn && !btn.contains(evt.target) && !pop.contains(evt.target)) {
+    pop.classList.add('hidden');
+  }
+});
+
+function closeSidebarDrawer() {
+  document.getElementById('side-drawer').classList.add('hidden');
+  document.querySelectorAll('.sidebar-nav-btn').forEach(btn => btn.classList.remove('active'));
+  state.activeSidebarPanel = null;
+}
+
+// "Home" nav button - unlike the other rail buttons, it doesn't open a
+// panel, it just closes whichever one is open so the chat area underneath
+// is visible again. Also collapses the sidebar on mobile/narrow layouts
+// where it's expanded, same as picking a connector/upload action does.
+function goToChatHome() {
+  closeSidebarDrawer();
+  const sidebar = document.getElementById('sidebar');
+  const hamburger = document.getElementById('sidebar-hamburger');
+  if (sidebar.classList.contains('collapsed') === false && window.innerWidth <= 768) {
+    sidebar.classList.add('collapsed');
+    hamburger.classList.add('collapsed');
+  }
+  scrollToBottom();
+}
+
+/* ── Knowledge bases (admin-curated, shared document sets) ──────── */
+async function loadKnowledgeBases() {
+  try {
+    const res = await fetch('/knowledge-bases', { headers: authHeaders() });
+    if (!res.ok) return;
+    state.knowledgeBases = await res.json();
+    renderKbList();
+  } catch (e) {
+    console.warn('Failed to load knowledge bases', e);
+    const list = document.getElementById('kb-list');
+    if (list) list.innerHTML = `<div class="kb-list-empty">Couldn't load knowledge bases.</div>`;
+  }
+}
+
+function renderKbList() {
+  const list = document.getElementById('kb-list');
+  if (!list) return;
+  const rows = [
+    { id: '', name: 'My uploaded documents', description: 'Files, URLs, and connectors you add yourself' },
+    ...state.knowledgeBases,
+  ];
+  list.innerHTML = rows.map(kb => {
+    const isActive = (state.selectedKnowledgeBaseId || '') === kb.id;
+    const safeName = escHtml(kb.name).replace(/'/g, "&#39;");
+    // Every row (including "My uploaded documents") gets an explicit
+    // Attach/Detach button - no relying on clicking the row itself, since
+    // that wasn't discoverable as an action.
+    const actionBtn = isActive
+      ? (kb.id ? `<button class="kb-row-action detach" onclick="event.stopPropagation(); detachKnowledgeBase();">Detach</button>`
+                : `<span class="kb-list-row-attached">Active</span>`)
+      : `<button class="kb-row-action attach" onclick="event.stopPropagation(); selectKnowledgeBase('${kb.id}', '${safeName}');">Attach</button>`;
+    return `
+    <div class="kb-list-row ${isActive ? 'active' : ''}">
+      <div class="kb-list-row-top">
+        <div class="kb-list-row-name">${escHtml(kb.name)}</div>
+        ${actionBtn}
+      </div>
+      ${kb.description ? `<div class="kb-list-row-desc">${escHtml(kb.description)}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function selectKnowledgeBase(id, name) {
+  state.selectedKnowledgeBaseId = id || null;
+  renderKbList();
+
+  const badge      = document.getElementById('session-badge');
+  const detachBtn  = document.getElementById('kb-detach-btn');
+  badge.classList.remove('hidden');
+  document.getElementById('session-label').textContent = id ? name : 'Session Active';
+  detachBtn.classList.toggle('hidden', !id);
+  toast(id ? `Now chatting with "${name}"` : 'Switched to your uploaded documents', 'success');
+}
+
+// Explicitly disconnects the active knowledge base - chat falls back to the
+// user's own uploaded documents, same effect as selecting that row, just
+// reachable with one click from the header instead of opening the panel.
+function detachKnowledgeBase() {
+  if (!state.selectedKnowledgeBaseId) return;
+  selectKnowledgeBase('', 'My uploaded documents');
+  toast('Knowledge base detached', 'info');
+}
+
+// The OAuth callback (gmail/google-drive) redirects back here
 // with ?connected=<provider> instead of leaving the browser on a bare JSON
 // page - this reopens the connectors panel straight to the fresh,
 // already-connected status, instead of the user having to navigate back and
@@ -51,7 +343,7 @@ function checkOAuthReturn() {
   url.searchParams.delete('connected');
   history.replaceState({}, '', url);
 
-  toggleConnectorsView();
+  showSidebarPanel('connectors');
   toast(`${provider.replace(/_/g, ' ')} connected!`, 'success');
 }
 
@@ -116,9 +408,23 @@ function initAuth() {
   }
 }
 
-function logout() {
+// A Google/Microsoft sign-in leaves its own persisted session behind
+// (written by Supabase's JS client on auth.html, under a separate
+// "sb-...-auth-token" key) - if that isn't cleared too, auth.html's
+// initOAuth() finds it still valid on the very next load and silently
+// logs the user back in, making "Sign Out" look like it does nothing.
+function clearAuthTokens() {
   localStorage.removeItem('rag_auth_token');
   localStorage.removeItem('rag_auth_user');
+  try {
+    Object.keys(localStorage)
+      .filter(k => k.startsWith('sb-') && k.endsWith('-auth-token'))
+      .forEach(k => localStorage.removeItem(k));
+  } catch (_) {}
+}
+
+function logout() {
+  clearAuthTokens();
   window.location.replace('/auth.html');
 }
 
@@ -140,14 +446,26 @@ function connectorHeaders(extra = {}) {
   });
 }
 
-function handleAuthError(res) {
-  if (res.status === 401) {
-    localStorage.removeItem('rag_auth_token');
-    localStorage.removeItem('rag_auth_user');
-    window.location.replace('/auth.html');
-    return true;
+// A 401 from /connectors/* doesn't always mean the user's own app session
+// expired - every connector client (gmail.py, outlook.py, google_drive.py,
+// etc.) also raises plain 401s for "this provider isn't connected" or "its
+// token expired", which only means that ONE connector needs reconnecting,
+// not that the whole chat session is dead. Only app/main.py's auth
+// middleware raises the two exact messages checked below; everything else
+// under 401 is connector-specific and must fall through to the caller's own
+// error handling instead of logging the user out of the whole app.
+async function handleAuthError(res) {
+  if (res.status !== 401) return false;
+  let detail = '';
+  try {
+    detail = (await res.clone().json())?.detail || '';
+  } catch (_) {}
+  if (detail !== 'Authentication required' && detail !== 'Invalid or expired token') {
+    return false;
   }
-  return false;
+  clearAuthTokens();
+  window.location.replace('/auth.html');
+  return true;
 }
 
 function _uuid() {
@@ -169,10 +487,45 @@ function initClientToken() {
     localStorage.setItem('rag_client_token', token);
   }
   state.clientToken = token;
+}
 
-  // Always have a valid UUID session ID - back-end falls back to sample if session is empty
-  if (!state.sessionId) {
-    state.sessionId = _uuid();
+// Restores the last active session (if any) after a page reload - without
+// this, state.sessionId only ever lived in memory, so reloading the page
+// (including the full-navigation round trip a connector's OAuth "Connect"
+// does) silently orphaned every document uploaded so far: the next
+// upload/ingest would start a brand new, unrelated session, making the
+// previous one(s) disappear from "attached documents" and from chat even
+// though they're still sitting untouched in the database. Called once on
+// load, after initClientToken() (needs state.clientToken implicitly via
+// authHeaders) and initAuth() (needs state.authToken).
+async function restoreSession() {
+  const saved = localStorage.getItem('rag_session_id');
+  if (!saved) return;
+  try {
+    const res = await fetch(`/upload/session-documents?session_id=${encodeURIComponent(saved)}`, { headers: authHeaders() });
+    if (!res.ok) { localStorage.removeItem('rag_session_id'); return; }
+    const docs = await safeJson(res);
+    if (!Array.isArray(docs) || docs.length === 0) {
+      // Nothing (or no longer anything) under this id - don't force the UI
+      // into a "ready" state with nothing actually attached.
+      localStorage.removeItem('rag_session_id');
+      return;
+    }
+
+    state.sessionId = saved;
+    state.isReady = true;
+    document.getElementById('session-badge').classList.remove('hidden');
+    document.getElementById('session-label').textContent = 'Session Active';
+    document.getElementById('reset-btn').classList.remove('hidden');
+
+    const input = document.getElementById('chat-input');
+    const sendBtn = document.getElementById('send-btn');
+    input.disabled = false;
+    input.placeholder = 'Ask anything about your data...';
+    sendBtn.disabled = false;
+  } catch (_) {
+    // Network hiccup while restoring - leave the session unattached rather
+    // than risk marking the UI "ready" with nothing actually confirmed.
   }
 }
 
@@ -181,14 +534,13 @@ function initAdvancedMode() {
   const toggle = document.getElementById('advanced-toggle');
   if (toggle) {
     toggle.checked = state.advancedMode;
+    // Label stays the short, static "Advanced" - the switch's own position
+    // and color already communicate on/off, so spelling "Mode: ON/OFF" out
+    // in text next to it too is redundant and reads as less polished.
     toggle.addEventListener('change', () => {
       state.advancedMode = toggle.checked;
       localStorage.setItem('rag_advanced_mode', state.advancedMode);
-      const label = document.getElementById('advanced-label');
-      if (label) label.textContent = state.advancedMode ? 'Advanced Mode: ON' : 'Advanced Mode: OFF';
     });
-    const label = document.getElementById('advanced-label');
-    if (label) label.textContent = state.advancedMode ? 'Advanced Mode: ON' : 'Advanced Mode: OFF';
   }
 }
 
@@ -200,63 +552,39 @@ function initThinkingMode() {
     toggle.addEventListener('change', () => {
       state.thinkingMode = toggle.checked;
       localStorage.setItem('rag_thinking_mode', state.thinkingMode);
-      const label = document.getElementById('thinking-label');
-      if (label) label.textContent = state.thinkingMode ? 'Thinking Mode: ON' : 'Thinking Mode: OFF';
     });
-    const label = document.getElementById('thinking-label');
-    if (label) label.textContent = state.thinkingMode ? 'Thinking Mode: ON' : 'Thinking Mode: OFF';
   }
 }
 
 /* ── Tabs ────────────────────────────────────────────────────── */
 function setupTabs() {
   document.querySelectorAll('.tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      const name = tab.dataset.tab;
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-      tab.classList.add('active');
-      document.getElementById(`panel-${name}`).classList.add('active');
-      state.activeTab = name;
-    });
+    tab.addEventListener('click', () => switchUploadTab(tab.dataset.tab));
   });
 }
 
-/* ── Connectors view toggle (swaps with the upload tabs) ────────── */
-function toggleConnectorsView() {
-  const uploadSection = document.getElementById('upload-section');
-  const connectorsSection = document.getElementById('connectors-section');
-  const processBtn = document.getElementById('process-btn');
-  const toggleBtnText = document.querySelector('#connectors-toggle-btn .btn-text');
-
-  const opening = connectorsSection.classList.contains('hidden');
-  uploadSection.classList.toggle('hidden', opening);
-  connectorsSection.classList.toggle('hidden', !opening);
-  processBtn.classList.toggle('hidden', opening);
-  toggleBtnText.textContent = opening ? 'Back to Upload' : 'Connect a Data Source';
-
-  if (opening) {
-    if (!state.connectorsUnlockToken) {
-      showConnectorsUnlockPrompt();
-    } else if (!state.connectorsLoaded) {
-      state.connectorsLoaded = true;
-      loadConnectors();
-    }
-  }
+// Shared by the visible Files/API tab buttons and by code that needs to land
+// on a specific tab without a button for it (e.g. the composer's "Add URL"
+// shortcut, which opens the Upload panel straight on the URL tab even
+// though that tab no longer has its own button in the tab bar).
+function switchUploadTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `panel-${name}`));
+  state.activeTab = name;
 }
 
 /* ── Connectors access gate ──────────────────────────────────── */
 // A second secret beyond normal login, required before any /connectors/*
 // call succeeds (enforced server-side in app/connectors/access_gate.py) -
-// connecting Gmail/GitHub/Jira/etc. is real access to someone's real
+// connecting Gmail/GitHub/etc. is real access to someone's real
 // third-party accounts, so it gets its own separate lock.
 function showConnectorsUnlockPrompt() {
   document.getElementById('connector-modal-title').textContent = 'Connectors are locked';
   const body = document.getElementById('connector-modal-body');
   body.innerHTML = `
-    <div class="connector-browse-note">Enter the connectors access key to use Gmail, GitHub, Jira, and the other source connectors.</div>
-    <input type="password" id="connectors-unlock-input" class="text-input" placeholder="Access key" autocomplete="off" />
-    <button class="connector-action-btn" id="connectors-unlock-submit" onclick="submitConnectorsUnlock()">Unlock</button>
+    <div class="connector-browse-note">Enter the connectors access key to use Gmail, GitHub, and the other source connectors.</div>
+    <input type="password" id="connectors-unlock-input" class="text-input connectors-unlock-input" placeholder="Access key" autocomplete="off" />
+    <button class="connectors-unlock-btn" id="connectors-unlock-submit" onclick="submitConnectorsUnlock()">Unlock</button>
     <div class="connector-browse-note" id="connectors-unlock-error"></div>
   `;
   document.getElementById('connector-modal').classList.remove('hidden');
@@ -279,7 +607,7 @@ async function submitConnectorsUnlock() {
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ access_key: key }),
     });
-    if (handleAuthError(res)) return;
+    if (await handleAuthError(res)) return;
     const data = await safeJson(res);
     if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
     state.connectorsUnlockToken = data.unlock_token;
@@ -745,7 +1073,7 @@ async function processFiles() {
       }),
     });
     if (!res.ok) {
-      if (handleAuthError(res)) return;
+      if (await handleAuthError(res)) return;
       const data = await safeJson(res);
       throw new Error(data?.detail || `Server error ${res.status}`);
     }
@@ -768,7 +1096,7 @@ async function processUrl(url) {
       body: JSON.stringify({ url, session_id: state.sessionId || undefined }),
     });
     if (!res.ok) {
-      if (handleAuthError(res)) return;
+      if (await handleAuthError(res)) return;
       const data = await safeJson(res);
       throw new Error(data?.detail || `Server error ${res.status}`);
     }
@@ -784,6 +1112,16 @@ async function processUrl(url) {
 function onProcessed(sessionId) {
   state.sessionId = sessionId;
   state.isReady = true;
+  // Persisted so a page reload (or the full-navigation round trip a
+  // connector's OAuth "Connect" does) can resume this session instead of
+  // orphaning it - see restoreSession().
+  localStorage.setItem('rag_session_id', sessionId);
+  // A fresh upload/connector ingest always means "chat with what I just
+  // added" - clear any previously selected knowledge base so the new
+  // session_id actually takes effect instead of being shadowed by a stale
+  // knowledge_base_id still being sent on every /chat/ call.
+  state.selectedKnowledgeBaseId = null;
+  renderKbList();
 
   document.getElementById('session-badge').classList.remove('hidden');
   document.getElementById('session-label').textContent = 'Session Active';
@@ -808,9 +1146,7 @@ function _connectorSvg(inner, viewBox = '0 0 24 24') {
 }
 
 const CONNECTOR_ICON = {
-  file_share: _connectorSvg('<path fill="#f59e0b" d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>'),
 
-  lms: _connectorSvg('<path fill="#0d9488" d="M6.5 2A2.5 2.5 0 0 0 4 4.5v15A2.5 2.5 0 0 0 6.5 22H20V2H6.5zm0 2H18v14.09A2.49 2.49 0 0 0 17 17.9V4.1a2.5 2.5 0 0 0-10.5 0zM6 18h11v2H6.5a.5.5 0 0 1 0-1H6z"/>'),
 
   // Simplified Octocat silhouette (the near-universal open-source GitHub mark).
   github: _connectorSvg('<path fill="#181717" d="M12 .5C5.73.5.5 5.73.5 12c0 5.08 3.29 9.39 7.86 10.91.58.1.79-.25.79-.56 0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.53-1.33-1.29-1.69-1.29-1.69-1.05-.72.08-.71.08-.71 1.16.08 1.78 1.19 1.78 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.26-1.28-5.26-5.69 0-1.26.45-2.29 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11.06 11.06 0 0 1 5.8 0c2.2-1.49 3.17-1.18 3.17-1.18.64 1.59.24 2.76.12 3.05.74.8 1.19 1.83 1.19 3.09 0 4.42-2.71 5.39-5.29 5.68.42.36.78 1.08.78 2.18 0 1.57-.01 2.83-.01 3.22 0 .31.21.67.8.56C19.72 21.39 23 17.08 23 12 23 5.73 17.77.5 12 .5z"/>'),
@@ -819,24 +1155,24 @@ const CONNECTOR_ICON = {
 
   google_drive: _connectorSvg('<path fill="#0066DA" d="M7.7 2 1 13.8l3.35 5.8L11 7.8z"/><path fill="#00AC47" d="m4.35 19.6 3.35 5.8h13.3l-3.35-5.8z" transform="translate(0 -5.8)"/><path fill="#EA4335" d="M11 7.8 17.65 19.6H24.65L17.95 2z"/><path fill="#FFBA00" d="M4.35 19.6h13.3l-3.35-5.8H7.7z"/>', '0 0 26 26'),
 
+  google_chat: _connectorSvg('<path fill="#00AC47" d="M12 2a10 10 0 0 0-8.5 15.2L2 22l4.9-1.5A10 10 0 1 0 12 2z"/><circle cx="8" cy="12" r="1.6" fill="#fff"/><circle cx="12" cy="12" r="1.6" fill="#fff"/><circle cx="16" cy="12" r="1.6" fill="#fff"/>'),
+
+  outlook: _connectorSvg('<rect x="2" y="4" width="20" height="16" rx="2" fill="#0078D4"/><path fill="#fff" d="M4 6.5 12 13l8-6.5V8l-8 6-8-6z"/><circle cx="8.5" cy="14" r="3.2" fill="#28A8EA" transform="translate(0 2)"/>'),
+
+  outlook_chat: _connectorSvg('<rect x="2" y="3" width="15" height="14" rx="2" fill="#5059C9"/><path fill="#fff" d="M5 6h9v2H5zM5 9.5h9v2H5z"/><path fill="#5059C9" d="M9 17h6l5 4v-4h-2v-5h-9z"/>'),
+
   sharepoint: _connectorSvg('<circle cx="9" cy="8" r="6" fill="#036C70"/><circle cx="16" cy="9" r="5" fill="#1A9BA1"/><circle cx="11" cy="16" r="5.5" fill="#37C6D0"/><path fill="#fff" d="M9.2 13.4h5.2a2 2 0 0 1 2 2v.3a4.1 4.1 0 0 1-4.1 4.1H9.2a1 1 0 0 1-1-1v-4.4a1 1 0 0 1 1-1z"/>'),
 
   teams: _connectorSvg('<path fill="#5059C9" d="M16.5 10.5a2.75 2.75 0 1 0 0-5.5 2.75 2.75 0 0 0 0 5.5zM20 11.5h-2.75a.75.75 0 0 0-.75.75v4.5A3.25 3.25 0 0 0 19.75 20 2.25 2.25 0 0 0 22 17.75V13.5a2 2 0 0 0-2-2z"/><circle cx="9.5" cy="7" r="3.5" fill="#7B83EB"/><path fill="#7B83EB" d="M14 12H5a2 2 0 0 0-2 2v3.5A4.5 4.5 0 0 0 7.5 22h1A5.5 5.5 0 0 0 14 16.5V13a1 1 0 0 0-1-1z"/>'),
 
   azure_devops: _connectorSvg('<path fill="#0078D4" d="M23 6.1 18 2v3l-9 2.3v7L4 16V9.3L1 10v7.2l5 2L18.1 15v3L23 13.9z"/>'),
-
-  jira: _connectorSvg('<path fill="#2684FF" d="M23.2 11.3 12.9.9a1 1 0 0 0-1.4 0L1.2 11.3a1 1 0 0 0 0 1.4L11.5 23a1 1 0 0 0 1.4 0l10.3-10.3a1 1 0 0 0 0-1.4z" opacity="0"/><path fill="#2684FF" d="M12 1 6.3 6.7A1 1 0 0 0 6.3 8.1L12 13.8 17.7 8.1a1 1 0 0 0 0-1.4z"/><path fill="#2684FF" d="M12 10.2 6.3 15.9a1 1 0 0 0 0 1.4L12 23l5.7-5.7a1 1 0 0 0 0-1.4z" opacity=".55"/>'),
-
-  servicenow: _connectorSvg('<circle cx="12" cy="12" r="11" fill="#62D84E"/><path fill="#fff" d="M7 14.2a1.4 1.4 0 0 1 2-1.9l2.3 2.1a1 1 0 0 0 1.4 0l2.3-2.1a1.4 1.4 0 1 1 1.9 2.1l-3 2.7a2.7 2.7 0 0 1-3.7 0z"/><path fill="#293e40" d="M7 10.6a1.4 1.4 0 0 1 1.9-2l2.3 2a1 1 0 0 0 1.4 0l2.3-2a1.4 1.4 0 0 1 1.9 2l-3 2.7a2.7 2.7 0 0 1-3.7 0z" opacity=".35"/>'),
-
-  salesforce: _connectorSvg('<path fill="#00A1E0" d="M9.9 6.4a3.9 3.9 0 0 1 6.9 1.5 3.3 3.3 0 0 1 4.6 3.1 3.3 3.3 0 0 1-1.1 6.4H7a4.3 4.3 0 0 1-1-8.4A4.2 4.2 0 0 1 9.9 6.4z"/>'),
 };
 
 async function loadConnectors() {
   const list = document.getElementById('connector-list');
   try {
     const res = await fetch('/connectors/status', { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
+    if (await handleAuthError(res)) return;
     if (handleConnectorsLockError(res)) return;
     const data = await safeJson(res);
     if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
@@ -897,7 +1233,8 @@ function connectorRowHtml(c) {
 async function connectOAuth(path) {
   try {
     const res = await fetch(`/connectors/${path}/auth/login`, { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
+    if (await handleAuthError(res)) return;
+    if (handleConnectorsLockError(res)) return;
     const data = await safeJson(res);
     if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
     window.location.href = data.auth_url;
@@ -914,20 +1251,16 @@ async function connectOAuth(path) {
 async function disconnectOAuth(path) {
   try {
     const res = await fetch(`/connectors/${path}/disconnect`, { method: 'POST', headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
+    if (await handleAuthError(res)) return;
     if (handleConnectorsLockError(res)) return;
     const data = await safeJson(res);
     if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
     toast('Disconnected', 'success');
-    // We just got a 200 back from the disconnect call itself - no need to
-    // pay for another full /connectors/status round-trip just to find out
-    // what we already know. Update this one row in place instead.
-    const c = state.connectors.find(x => x.path === path);
-    if (c) {
-      c.connected = false;
-      c.own_credentials = false;
-      renderConnectors();
-    }
+    // Gmail and Google Chat share one Google OAuth grant server-side, so
+    // disconnecting either unlinks both - a single-row patch would leave the
+    // other one showing a stale "Connected" badge. Full /connectors/status
+    // refetch keeps every row correct at the cost of one extra round-trip.
+    await loadConnectors();
   } catch (e) {
     toast(e.message, 'error');
   }
@@ -935,8 +1268,8 @@ async function disconnectOAuth(path) {
 
 // Opens a form (in the same modal Browse uses) for a byok connector's
 // per-provider credential fields, from /status's credential_fields - so this
-// one function handles GitHub (1 field), Jira (3 fields), ServiceNow
-// (3 fields), and Azure DevOps (2 fields) without hardcoding any of them.
+// one function handles GitHub (1 field) and Azure DevOps (2 fields)
+// without hardcoding either of them.
 function openCredentialsForm(id) {
   const meta = state.connectors.find(c => c.id === id);
   if (!meta || !meta.credential_fields) return;
@@ -950,7 +1283,7 @@ function openCredentialsForm(id) {
   document.getElementById('connector-modal-body').innerHTML = `
     <div class="connector-browse-note">Your key is stored for your account only and never shared with other users.</div>
     ${fieldsHtml}
-    <button class="connector-action-btn" onclick="submitCredentials('${id}')">Save &amp; Connect</button>
+    <button class="connector-submit-btn" onclick="submitCredentials('${id}')">Save &amp; Connect</button>
     <div class="connector-browse-note" id="cred-error"></div>
   `;
 
@@ -975,7 +1308,7 @@ async function submitCredentials(id) {
       headers: connectorHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
     });
-    if (handleAuthError(res)) return;
+    if (await handleAuthError(res)) return;
     if (handleConnectorsLockError(res)) return;
     const data = await safeJson(res);
     if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
@@ -1000,19 +1333,18 @@ function openConnectorModal(id) {
   document.getElementById('connector-modal-title').textContent = meta ? `Browse ${meta.name}` : 'Browse';
 
   const body = document.getElementById('connector-modal-body');
-  body.innerHTML = `<div id="connector-browse-${id}"></div>`;
+  body.innerHTML = `<div class="connector-browse-hint">Click a file below to add it to this chat instantly - no extra "Process" step needed.</div>` +
+    `<div id="connector-browse-${id}"></div>`;
 
   document.getElementById('connector-modal').classList.remove('hidden');
   document.addEventListener('keydown', _connectorModalEscHandler);
 
-  if (id === 'file_share') return browseFileShare('');
-  if (id === 'lms') return browseLmsCourses();
   if (id === 'github') return browseGithubRepos();
   if (id === 'gmail') return browseGmailMessages();
   if (id === 'google_drive') return browseGoogleDriveRoot();
-  if (id === 'jira') return browseJiraProjects();
-  if (id === 'servicenow') return browseServiceNowIncidents();
-  if (id === 'salesforce') return browseSalesforceCategories();
+  if (id === 'google_chat') return browseGoogleChatSpaces();
+  if (id === 'outlook') return browseOutlookMessages();
+  if (id === 'outlook_chat') return browseOutlookChats();
   if (id === 'sharepoint') return browseSharepointSites();
   if (id === 'teams') return browseTeamsList();
   if (id === 'azure_devops') return browseAzureDevOpsProjects();
@@ -1053,7 +1385,8 @@ async function renderConnectorBrowse(elementId, url, render) {
   el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
   try {
     const res = await fetch(url, { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
+    if (await handleAuthError(res)) return;
+    if (handleConnectorsLockError(res)) return;
     const data = await safeJson(res);
     if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
     el.innerHTML = render(data);
@@ -1062,63 +1395,6 @@ async function renderConnectorBrowse(elementId, url, render) {
   }
 }
 
-/* ── File Share browser ──────────────────────────────────────── */
-async function browseFileShare(path) {
-  await renderConnectorBrowse(
-    'connector-browse-file_share',
-    `/connectors/file-share/files?path=${encodeURIComponent(path)}`,
-    data => {
-      const crumbs = breadcrumbHtml(path, p => `browseFileShare('${escAttr(p)}')`);
-      const rows = (data.items || []).map(item => item.type === 'folder'
-        ? `<div class="connector-item-row is-folder" onclick="browseFileShare('${escAttr(item.path)}')">
-             <span class="ci-name">📁 ${escHtml(item.name)}</span>
-           </div>`
-        : `<div class="connector-item-row" onclick="ingestFileShareFile('${escAttr(item.path)}', '${escAttr(item.name)}')">
-             <span class="ci-name">📄 ${escHtml(item.name)}</span>
-             <span class="ci-meta">${item.size != null ? formatBytes(item.size) : ''}</span>
-           </div>`
-      ).join('') || '<div class="connector-browse-note">Empty folder</div>';
-      return crumbs + rows;
-    },
-  );
-}
-
-async function ingestFileShareFile(path, name) {
-  await runConnectorIngest('file_share', { path }, name);
-}
-
-/* ── LMS browser ─────────────────────────────────────────────── */
-async function browseLmsCourses() {
-  await renderConnectorBrowse(
-    'connector-browse-lms',
-    '/connectors/lms/courses',
-    data => (data.items || []).map(c => `
-      <div class="connector-item-row is-folder" onclick="browseLmsFiles('${escAttr(c.id)}', '${escAttr(c.name)}')">
-        <span class="ci-name">📁 ${escHtml(c.name)}</span>
-        <span class="ci-meta">${c.module_count} modules</span>
-      </div>`).join('') || '<div class="connector-browse-note">No courses</div>',
-  );
-}
-
-async function browseLmsFiles(courseId, courseName) {
-  await renderConnectorBrowse(
-    'connector-browse-lms',
-    `/connectors/lms/courses/${encodeURIComponent(courseId)}/files`,
-    data => {
-      const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseLmsCourses()">Courses</a> / ${escHtml(courseName)}</div>`;
-      const rows = (data.items || []).map(f => `
-        <div class="connector-item-row" onclick="ingestLmsFile('${escAttr(f.id)}', '${escAttr(f.name)}')">
-          <span class="ci-name">📄 ${escHtml(f.name)}</span>
-          <span class="ci-meta">${f.size != null ? formatBytes(f.size) : ''}</span>
-        </div>`).join('') || '<div class="connector-browse-note">No files in this course</div>';
-      return crumbs + rows;
-    },
-  );
-}
-
-async function ingestLmsFile(fileId, name) {
-  await runConnectorIngest('lms', { file_id: fileId }, name);
-}
 
 /* ── GitHub browser ──────────────────────────────────────────── */
 async function browseGithubRepos() {
@@ -1171,22 +1447,87 @@ async function ingestGithubFile(owner, repo, path, ref, name) {
 
 /* ── Gmail browser ────────────────────────────────────────────── */
 let _gmailNextToken = null;
+let _gmailLabel = 'inbox';
+let _gmailSelected = new Set();   // message ids selected across the current label's loaded pages
+
+const GMAIL_LABELS = [
+  { id: 'inbox', name: 'Inbox' },
+  { id: 'spam', name: 'Spam' },
+  { id: 'promotions', name: 'Promotions' },
+  { id: 'social', name: 'Social' },
+  { id: 'updates', name: 'Updates' },
+  { id: 'forums', name: 'Forums' },
+  { id: 'sent', name: 'Sent' },
+  { id: 'all', name: 'All Mail' },
+];
+
+function _gmailLabelTabsHtml() {
+  return `<div class="gmail-label-tabs">` +
+    GMAIL_LABELS.map(l => `<button class="gmail-label-tab${l.id === _gmailLabel ? ' active' : ''}" onclick="switchGmailLabel('${l.id}')">${escHtml(l.name)}</button>`).join('') +
+    `</div>`;
+}
+
+function _gmailBulkControlsHtml() {
+  const n = _gmailSelected.size;
+  return `
+    <div class="gmail-bulk-controls">
+      <label class="gmail-select-all">
+        <input type="checkbox" id="gmail-select-all-cb" onchange="toggleGmailSelectAllLoaded(this.checked)">
+        Select all loaded
+      </label>
+      <button class="connector-action-btn" ${n ? '' : 'disabled'} onclick="bulkIngestGmail('selected')">Add selected (${n})</button>
+      <span class="gmail-bulk-sep">or</span>
+      <input type="number" id="gmail-latest-count" class="gmail-count-input" min="1" placeholder="e.g. 100">
+      <button class="connector-action-btn" onclick="bulkIngestGmail('count')">Add latest N</button>
+      <button class="connector-action-btn secondary" onclick="bulkIngestGmail('all')">Add all in ${escHtml(_gmailLabel)}</button>
+    </div>`;
+}
+
+function switchGmailLabel(label) {
+  if (label === _gmailLabel) return;
+  _gmailLabel = label;
+  _gmailSelected.clear();
+  _gmailNextToken = null;
+  browseGmailMessages();
+}
+
+function toggleGmailSelect(messageId, checked) {
+  if (checked) _gmailSelected.add(messageId);
+  else _gmailSelected.delete(messageId);
+  const el = document.getElementById('connector-browse-gmail');
+  const controls = el?.querySelector('.gmail-bulk-controls');
+  if (controls) controls.outerHTML = _gmailBulkControlsHtml();
+}
+
+function toggleGmailSelectAllLoaded(checked) {
+  const el = document.getElementById('connector-browse-gmail');
+  el.querySelectorAll('.gmail-row-cb').forEach(cb => {
+    cb.checked = checked;
+    if (checked) _gmailSelected.add(cb.dataset.id);
+    else _gmailSelected.delete(cb.dataset.id);
+  });
+  const controls = el.querySelector('.gmail-bulk-controls');
+  if (controls) controls.outerHTML = _gmailBulkControlsHtml();
+}
 
 async function browseGmailMessages(pageToken = '', append = false) {
   const el = document.getElementById('connector-browse-gmail');
-  if (!append) el.innerHTML = '<div class="connector-browse-note">Loading…</div>';
+  if (!append) el.innerHTML = _gmailLabelTabsHtml() + _gmailBulkControlsHtml() + '<div class="connector-browse-note">Loading…</div>';
   try {
-    const params = new URLSearchParams({ max_results: '50' });
+    const params = new URLSearchParams({ max_results: '50', label: _gmailLabel });
     if (pageToken) params.set('page_token', pageToken);
     const res = await fetch(`/connectors/gmail/messages?${params}`, { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
+    if (await handleAuthError(res)) return;
+    if (handleConnectorsLockError(res)) return;
     const data = await safeJson(res);
     if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
 
     const rows = (data.messages || []).map(m => `
-      <div class="connector-item-row" onclick="browseGmailMessage('${escAttr(m.id)}', '${escAttr(m.subject)}')">
-        <span class="ci-name">✉️ ${escHtml(m.subject || '(No Subject)')}</span>
-        <span class="ci-meta">${escHtml(m.from || '')}</span>
+      <div class="connector-item-row gmail-row">
+        <input type="checkbox" class="gmail-row-cb" data-id="${escAttr(m.id)}" ${_gmailSelected.has(m.id) ? 'checked' : ''}
+               onclick="event.stopPropagation(); toggleGmailSelect('${escAttr(m.id)}', this.checked)">
+        <span class="ci-name" onclick="browseGmailMessage('${escAttr(m.id)}', '${escAttr(m.subject)}')">✉️ ${escHtml(m.subject || '(No Subject)')}</span>
+        <span class="ci-meta" onclick="browseGmailMessage('${escAttr(m.id)}', '${escAttr(m.subject)}')">${escHtml(m.from || '')}</span>
       </div>`).join('');
 
     _gmailNextToken = data.next_page_token || null;
@@ -1199,10 +1540,11 @@ async function browseGmailMessages(pageToken = '', append = false) {
       if (prevBtn) prevBtn.remove();
       el.insertAdjacentHTML('beforeend', rows + loadMore);
     } else {
-      el.innerHTML = (rows + loadMore) || '<div class="connector-browse-note">No messages</div>';
+      el.innerHTML = _gmailLabelTabsHtml() + _gmailBulkControlsHtml() +
+        ((rows + loadMore) || '<div class="connector-browse-note">No messages in this label</div>');
     }
   } catch (e) {
-    el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
+    el.innerHTML = _gmailLabelTabsHtml() + `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
   }
 }
 
@@ -1211,7 +1553,7 @@ async function browseGmailMessage(messageId, subject) {
     'connector-browse-gmail',
     `/connectors/gmail/messages/${encodeURIComponent(messageId)}`,
     data => {
-      const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseGmailMessages()">Inbox</a> / ${escHtml(subject)}</div>`;
+      const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseGmailMessages()">${escHtml(GMAIL_LABELS.find(l => l.id === _gmailLabel)?.name || 'Inbox')}</a> / ${escHtml(subject)}</div>`;
       // Ingesting a message always pulls in the body text plus every
       // attachment's extracted text, combined into one document - there's
       // no per-attachment picking, so attachments are listed here just for
@@ -1225,18 +1567,555 @@ async function browseGmailMessage(messageId, subject) {
           <span class="ci-name">✉️ ${escHtml(subject)}</span>
           <button class="connector-action-btn" onclick="event.stopPropagation(); ingestGmailEmail('${escAttr(messageId)}', '${escAttr(subject)}')">${escHtml(addLabel)}</button>
         </div>`;
+      const metaRows = `
+        <div class="connector-browse-note">
+          ${data.cc ? `Cc: ${escHtml(data.cc)}<br>` : ''}
+          To: ${escHtml(data.to || '')}<br>
+          Date: ${escHtml(data.date || '')}
+        </div>`;
       const attachmentRows = attachments.map(a => `
         <div class="connector-item-row">
           <span class="ci-name">📎 ${escHtml(a.filename)}</span>
           <span class="ci-meta">${a.size != null ? formatBytes(a.size) : ''}</span>
         </div>`).join('');
-      return crumbs + addRow + attachmentRows;
+      return crumbs + addRow + metaRows + attachmentRows;
     },
   );
 }
 
 async function ingestGmailEmail(messageId, subject) {
-  await runConnectorIngest('gmail', { message_id: messageId }, subject || 'email');
+  // Gmail's single-email ingest is one blocking call with no SSE progress
+  // events (unlike /files or the bulk endpoint below) - runConnectorIngest's
+  // plain toast was easy to miss since it auto-dismisses after 4s, often
+  // before parsing+embedding the email (and its attachments) finishes. Use
+  // the same persistent ProgressCard the upload/bulk flows use instead, so
+  // there's always a visible "Processing… -> done" state on screen.
+  closeConnectorModal();
+  const label = subject || 'email';
+  const card = new ProgressCard(`Adding ${label}`);
+  card.addStep('gmail_single', `Processing ${label} (body + attachments)...`);
+  const t0 = Date.now();
+  try {
+    const res = await fetch('/connectors/gmail/ingest', {
+      method: 'POST',
+      headers: connectorHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ message_id: messageId, session_id: state.sessionId || undefined }),
+    });
+    if (await handleAuthError(res)) return;
+    if (handleConnectorsLockError(res)) return;
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
+    const elapsed = (Date.now() - t0) / 1000;
+    card.doneStep('gmail_single', data.filename || label, elapsed);
+    card.complete(elapsed, 'Email processed - ready to chat!');
+    onProcessed(data.session_id);
+    toast('Ready to chat!', 'success');
+  } catch (e) {
+    card.errorStep('gmail_single', e.message);
+    card.fail(e.message);
+    toast(e.message, 'error');
+  }
+}
+
+async function bulkIngestGmail(mode) {
+  const body = { mode, label: _gmailLabel, session_id: state.sessionId || undefined };
+  let label;
+  if (mode === 'selected') {
+    if (!_gmailSelected.size) return;
+    body.message_ids = Array.from(_gmailSelected);
+    label = `${body.message_ids.length} selected email(s)`;
+  } else if (mode === 'count') {
+    const n = parseInt(document.getElementById('gmail-latest-count')?.value || '', 10);
+    if (!n || n < 1) { toast('Enter how many of the latest emails to add', 'error'); return; }
+    body.count = n;
+    label = `the latest ${n} email(s)`;
+  } else {
+    label = `all emails in ${_gmailLabel}`;
+  }
+
+  closeConnectorModal();
+  const card = new ProgressCard(`Adding ${label}`);
+  try {
+    const res = await fetch('/connectors/gmail/ingest/bulk', {
+      method: 'POST',
+      headers: connectorHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (await handleAuthError(res)) return;
+    if (handleConnectorsLockError(res)) return;
+    if (!res.ok) {
+      const data = await safeJson(res);
+      throw new Error(data?.detail || `Server error ${res.status}`);
+    }
+    await readSSEStream(res, (ev) => handleProgressEvent(card, ev));
+    _gmailSelected.clear();
+  } catch (e) {
+    card.fail(e.message);
+    toast(e.message, 'error');
+  }
+}
+
+/* ── Google Chat browser ──────────────────────────────────────── */
+// Mirrors the Gmail label-tab + checkbox + bulk-select pattern above (reuses
+// the same .gmail-label-tab* / .gmail-row-cb CSS - it's generic chrome, not
+// Gmail-specific styling). A Google Chat "space" covers spaces, group
+// chats, AND direct messages (distinguished only by spaceType), so the tabs
+// here are "All / Spaces / Group Chats / Direct Messages" instead of Gmail's
+// inbox/spam/etc. labels.
+let _gchatSpaceType = 'all';
+let _gchatSelected = new Set();
+
+const GCHAT_SPACE_TYPES = [
+  { id: 'all', name: 'All' },
+  { id: 'space', name: 'Spaces' },
+  { id: 'group_chat', name: 'Group Chats' },
+  { id: 'direct_message', name: 'Direct Messages' },
+];
+
+function _gchatTabsHtml() {
+  return `<div class="gmail-label-tabs">` +
+    GCHAT_SPACE_TYPES.map(t => `<button class="gmail-label-tab${t.id === _gchatSpaceType ? ' active' : ''}" onclick="switchGchatSpaceType('${t.id}')">${escHtml(t.name)}</button>`).join('') +
+    `</div>`;
+}
+
+function _gchatBulkControlsHtml() {
+  const n = _gchatSelected.size;
+  return `
+    <div class="gmail-bulk-controls">
+      <label class="gmail-select-all">
+        <input type="checkbox" id="gchat-select-all-cb" onchange="toggleGchatSelectAllLoaded(this.checked)">
+        Select all loaded
+      </label>
+      <button class="connector-action-btn" ${n ? '' : 'disabled'} onclick="bulkIngestGoogleChat('selected')">Add selected (${n})</button>
+      <span class="gmail-bulk-sep">or</span>
+      <button class="connector-action-btn secondary" onclick="bulkIngestGoogleChat('all')">Add all in ${escHtml(GCHAT_SPACE_TYPES.find(t => t.id === _gchatSpaceType)?.name || 'All')}</button>
+    </div>`;
+}
+
+function switchGchatSpaceType(type) {
+  if (type === _gchatSpaceType) return;
+  _gchatSpaceType = type;
+  _gchatSelected.clear();
+  browseGoogleChatSpaces();
+}
+
+function toggleGchatSelect(spaceId, checked) {
+  if (checked) _gchatSelected.add(spaceId);
+  else _gchatSelected.delete(spaceId);
+  const el = document.getElementById('connector-browse-google_chat');
+  const controls = el?.querySelector('.gmail-bulk-controls');
+  if (controls) controls.outerHTML = _gchatBulkControlsHtml();
+}
+
+function toggleGchatSelectAllLoaded(checked) {
+  const el = document.getElementById('connector-browse-google_chat');
+  el.querySelectorAll('.gmail-row-cb').forEach(cb => {
+    cb.checked = checked;
+    if (checked) _gchatSelected.add(cb.dataset.id);
+    else _gchatSelected.delete(cb.dataset.id);
+  });
+  const controls = el.querySelector('.gmail-bulk-controls');
+  if (controls) controls.outerHTML = _gchatBulkControlsHtml();
+}
+
+async function browseGoogleChatSpaces(pageToken = '', append = false) {
+  const el = document.getElementById('connector-browse-google_chat');
+  if (!append) el.innerHTML = _gchatTabsHtml() + _gchatBulkControlsHtml() + '<div class="connector-browse-note">Loading…</div>';
+  try {
+    const params = new URLSearchParams({ page_size: '50', space_type: _gchatSpaceType });
+    if (pageToken) params.set('page_token', pageToken);
+    const res = await fetch(`/connectors/google-chat/spaces?${params}`, { headers: connectorHeaders() });
+    if (await handleAuthError(res)) return;
+    if (handleConnectorsLockError(res)) return;
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
+
+    const rows = (data.spaces || []).map(s => `
+      <div class="connector-item-row gmail-row">
+        <input type="checkbox" class="gmail-row-cb" data-id="${escAttr(s.id)}" ${_gchatSelected.has(s.id) ? 'checked' : ''}
+               onclick="event.stopPropagation(); toggleGchatSelect('${escAttr(s.id)}', this.checked)">
+        <span class="ci-name">💬 ${escHtml(s.name)}</span>
+        <span class="ci-meta">${escHtml((s.space_type || '').replace(/_/g, ' ').toLowerCase())}</span>
+      </div>`).join('');
+
+    const nextToken = data.next_page_token || null;
+    const loadMore = nextToken
+      ? `<button class="connector-load-more" onclick="browseGoogleChatSpaces('${escAttr(nextToken)}', true)">Load more chats</button>`
+      : '';
+
+    if (append) {
+      const prevBtn = el.querySelector('.connector-load-more');
+      if (prevBtn) prevBtn.remove();
+      el.insertAdjacentHTML('beforeend', rows + loadMore);
+    } else {
+      el.innerHTML = _gchatTabsHtml() + _gchatBulkControlsHtml() +
+        ((rows + loadMore) || '<div class="connector-browse-note">No chats/spaces in this tab</div>');
+    }
+  } catch (e) {
+    el.innerHTML = _gchatTabsHtml() + `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
+  }
+}
+
+async function bulkIngestGoogleChat(mode) {
+  const body = { mode, space_type: _gchatSpaceType, session_id: state.sessionId || undefined };
+  let label;
+  if (mode === 'selected') {
+    if (!_gchatSelected.size) return;
+    body.space_ids = Array.from(_gchatSelected);
+    label = `${body.space_ids.length} selected chat(s)`;
+  } else {
+    label = `all chats in ${_gchatSpaceType}`;
+  }
+
+  closeConnectorModal();
+  const card = new ProgressCard(`Adding ${label}`);
+  try {
+    const res = await fetch('/connectors/google-chat/ingest/bulk', {
+      method: 'POST',
+      headers: connectorHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (await handleAuthError(res)) return;
+    if (handleConnectorsLockError(res)) return;
+    if (!res.ok) {
+      const data = await safeJson(res);
+      throw new Error(data?.detail || `Server error ${res.status}`);
+    }
+    await readSSEStream(res, (ev) => handleProgressEvent(card, ev));
+    _gchatSelected.clear();
+  } catch (e) {
+    card.fail(e.message);
+    toast(e.message, 'error');
+  }
+}
+
+/* ── Outlook Mail browser ─────────────────────────────────────── */
+// Mirrors the Gmail label-tab + checkbox + bulk-select pattern exactly
+// (same .gmail-label-tab* / .gmail-row-cb CSS). Folder tabs instead of
+// Gmail's labels, and Graph's @odata.nextLink instead of a page token, but
+// otherwise identical shape - selected/count/all bulk modes included.
+let _outlookFolder = 'inbox';
+let _outlookSelected = new Set();
+let _outlookNextLink = null;
+
+const OUTLOOK_FOLDERS = [
+  { id: 'inbox', name: 'Inbox' },
+  { id: 'junk', name: 'Junk' },
+  { id: 'sent', name: 'Sent' },
+  { id: 'drafts', name: 'Drafts' },
+  { id: 'deleted', name: 'Deleted' },
+  { id: 'all', name: 'All Mail' },
+];
+
+function _outlookTabsHtml() {
+  return `<div class="gmail-label-tabs">` +
+    OUTLOOK_FOLDERS.map(f => `<button class="gmail-label-tab${f.id === _outlookFolder ? ' active' : ''}" onclick="switchOutlookFolder('${f.id}')">${escHtml(f.name)}</button>`).join('') +
+    `</div>`;
+}
+
+function _outlookBulkControlsHtml() {
+  const n = _outlookSelected.size;
+  return `
+    <div class="gmail-bulk-controls">
+      <label class="gmail-select-all">
+        <input type="checkbox" id="outlook-select-all-cb" onchange="toggleOutlookSelectAllLoaded(this.checked)">
+        Select all loaded
+      </label>
+      <button class="connector-action-btn" ${n ? '' : 'disabled'} onclick="bulkIngestOutlook('selected')">Add selected (${n})</button>
+      <span class="gmail-bulk-sep">or</span>
+      <input type="number" id="outlook-latest-count" class="gmail-count-input" min="1" placeholder="e.g. 100">
+      <button class="connector-action-btn" onclick="bulkIngestOutlook('count')">Add latest N</button>
+      <button class="connector-action-btn secondary" onclick="bulkIngestOutlook('all')">Add all in ${escHtml(_outlookFolder)}</button>
+    </div>`;
+}
+
+function switchOutlookFolder(folder) {
+  if (folder === _outlookFolder) return;
+  _outlookFolder = folder;
+  _outlookSelected.clear();
+  _outlookNextLink = null;
+  browseOutlookMessages();
+}
+
+function toggleOutlookSelect(messageId, checked) {
+  if (checked) _outlookSelected.add(messageId);
+  else _outlookSelected.delete(messageId);
+  const el = document.getElementById('connector-browse-outlook');
+  const controls = el?.querySelector('.gmail-bulk-controls');
+  if (controls) controls.outerHTML = _outlookBulkControlsHtml();
+}
+
+function toggleOutlookSelectAllLoaded(checked) {
+  const el = document.getElementById('connector-browse-outlook');
+  el.querySelectorAll('.gmail-row-cb').forEach(cb => {
+    cb.checked = checked;
+    if (checked) _outlookSelected.add(cb.dataset.id);
+    else _outlookSelected.delete(cb.dataset.id);
+  });
+  const controls = el.querySelector('.gmail-bulk-controls');
+  if (controls) controls.outerHTML = _outlookBulkControlsHtml();
+}
+
+async function browseOutlookMessages(nextLink = '', append = false) {
+  const el = document.getElementById('connector-browse-outlook');
+  if (!append) el.innerHTML = _outlookTabsHtml() + _outlookBulkControlsHtml() + '<div class="connector-browse-note">Loading…</div>';
+  try {
+    const params = new URLSearchParams({ max_results: '25', folder: _outlookFolder });
+    if (nextLink) params.set('next_link', nextLink);
+    const res = await fetch(`/connectors/outlook/messages?${params}`, { headers: connectorHeaders() });
+    if (await handleAuthError(res)) return;
+    if (handleConnectorsLockError(res)) return;
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
+
+    const rows = (data.messages || []).map(m => `
+      <div class="connector-item-row gmail-row">
+        <input type="checkbox" class="gmail-row-cb" data-id="${escAttr(m.id)}" ${_outlookSelected.has(m.id) ? 'checked' : ''}
+               onclick="event.stopPropagation(); toggleOutlookSelect('${escAttr(m.id)}', this.checked)">
+        <span class="ci-name" onclick="browseOutlookMessage('${escAttr(m.id)}', '${escAttr(m.subject)}')">✉️ ${escHtml(m.subject || '(No Subject)')}</span>
+        <span class="ci-meta" onclick="browseOutlookMessage('${escAttr(m.id)}', '${escAttr(m.subject)}')">${escHtml(m.from || '')}</span>
+      </div>`).join('');
+
+    _outlookNextLink = data.next_link || null;
+    const loadMore = _outlookNextLink
+      ? `<button class="connector-load-more" onclick="browseOutlookMessages('${escAttr(_outlookNextLink)}', true)">Load more messages</button>`
+      : '';
+
+    if (append) {
+      const prevBtn = el.querySelector('.connector-load-more');
+      if (prevBtn) prevBtn.remove();
+      el.insertAdjacentHTML('beforeend', rows + loadMore);
+    } else {
+      el.innerHTML = _outlookTabsHtml() + _outlookBulkControlsHtml() +
+        ((rows + loadMore) || '<div class="connector-browse-note">No messages in this folder</div>');
+    }
+  } catch (e) {
+    el.innerHTML = _outlookTabsHtml() + `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
+  }
+}
+
+async function browseOutlookMessage(messageId, subject) {
+  await renderConnectorBrowse(
+    'connector-browse-outlook',
+    `/connectors/outlook/messages/${encodeURIComponent(messageId)}`,
+    data => {
+      const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseOutlookMessages()">${escHtml(OUTLOOK_FOLDERS.find(f => f.id === _outlookFolder)?.name || 'Inbox')}</a> / ${escHtml(subject)}</div>`;
+      const attachments = data.attachments || [];
+      const addLabel = attachments.length
+        ? `Add this email (body + ${attachments.length} attachment${attachments.length > 1 ? 's' : ''})`
+        : 'Add this email';
+      const addRow = `
+        <div class="connector-item-row">
+          <span class="ci-name">✉️ ${escHtml(subject)}</span>
+          <button class="connector-action-btn" onclick="event.stopPropagation(); ingestOutlookEmail('${escAttr(messageId)}', '${escAttr(subject)}')">${escHtml(addLabel)}</button>
+        </div>`;
+      const metaRows = `
+        <div class="connector-browse-note">
+          ${data.cc ? `Cc: ${escHtml(data.cc)}<br>` : ''}
+          To: ${escHtml(data.to || '')}<br>
+          Date: ${escHtml(data.date || '')}
+        </div>`;
+      const attachmentRows = attachments.map(a => `
+        <div class="connector-item-row">
+          <span class="ci-name">📎 ${escHtml(a.filename)}</span>
+          <span class="ci-meta">${a.size != null ? formatBytes(a.size) : ''}</span>
+        </div>`).join('');
+      return crumbs + addRow + metaRows + attachmentRows;
+    },
+  );
+}
+
+async function ingestOutlookEmail(messageId, subject) {
+  // Routed through the bulk endpoint with a single id - it already streams
+  // real SSE progress (unlike Gmail's single-message endpoint, which has no
+  // SSE and needed its own manual ProgressCard handling in ingestGmailEmail),
+  // so this can just reuse handleProgressEvent directly like bulkIngestOutlook.
+  closeConnectorModal();
+  const card = new ProgressCard(`Adding ${subject || 'email'}`);
+  try {
+    const res = await fetch('/connectors/outlook/ingest/bulk', {
+      method: 'POST',
+      headers: connectorHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ mode: 'selected', message_ids: [messageId], session_id: state.sessionId || undefined }),
+    });
+    if (await handleAuthError(res)) return;
+    if (handleConnectorsLockError(res)) return;
+    if (!res.ok) {
+      const data = await safeJson(res);
+      throw new Error(data?.detail || `Server error ${res.status}`);
+    }
+    await readSSEStream(res, (ev) => handleProgressEvent(card, ev));
+  } catch (e) {
+    card.fail(e.message);
+    toast(e.message, 'error');
+  }
+}
+
+async function bulkIngestOutlook(mode) {
+  const body = { mode, folder: _outlookFolder, session_id: state.sessionId || undefined };
+  let label;
+  if (mode === 'selected') {
+    if (!_outlookSelected.size) return;
+    body.message_ids = Array.from(_outlookSelected);
+    label = `${body.message_ids.length} selected email(s)`;
+  } else if (mode === 'count') {
+    const n = parseInt(document.getElementById('outlook-latest-count')?.value || '', 10);
+    if (!n || n < 1) { toast('Enter how many of the latest emails to add', 'error'); return; }
+    body.count = n;
+    label = `the latest ${n} email(s)`;
+  } else {
+    label = `all emails in ${_outlookFolder}`;
+  }
+
+  closeConnectorModal();
+  const card = new ProgressCard(`Adding ${label}`);
+  try {
+    const res = await fetch('/connectors/outlook/ingest/bulk', {
+      method: 'POST',
+      headers: connectorHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (await handleAuthError(res)) return;
+    if (handleConnectorsLockError(res)) return;
+    if (!res.ok) {
+      const data = await safeJson(res);
+      throw new Error(data?.detail || `Server error ${res.status}`);
+    }
+    await readSSEStream(res, (ev) => handleProgressEvent(card, ev));
+    _outlookSelected.clear();
+  } catch (e) {
+    card.fail(e.message);
+    toast(e.message, 'error');
+  }
+}
+
+/* ── Outlook Chat browser ─────────────────────────────────────── */
+// Mirrors the Google Chat tab + checkbox + bulk-select pattern exactly.
+let _ochatType = 'all';
+let _ochatSelected = new Set();
+
+const OCHAT_TYPES = [
+  { id: 'all', name: 'All' },
+  { id: 'one_on_one', name: 'Direct' },
+  { id: 'group', name: 'Group Chats' },
+  { id: 'meeting', name: 'Meetings' },
+];
+
+function _ochatTabsHtml() {
+  return `<div class="gmail-label-tabs">` +
+    OCHAT_TYPES.map(t => `<button class="gmail-label-tab${t.id === _ochatType ? ' active' : ''}" onclick="switchOchatType('${t.id}')">${escHtml(t.name)}</button>`).join('') +
+    `</div>`;
+}
+
+function _ochatBulkControlsHtml() {
+  const n = _ochatSelected.size;
+  return `
+    <div class="gmail-bulk-controls">
+      <label class="gmail-select-all">
+        <input type="checkbox" id="ochat-select-all-cb" onchange="toggleOchatSelectAllLoaded(this.checked)">
+        Select all loaded
+      </label>
+      <button class="connector-action-btn" ${n ? '' : 'disabled'} onclick="bulkIngestOutlookChat('selected')">Add selected (${n})</button>
+      <span class="gmail-bulk-sep">or</span>
+      <button class="connector-action-btn secondary" onclick="bulkIngestOutlookChat('all')">Add all in ${escHtml(OCHAT_TYPES.find(t => t.id === _ochatType)?.name || 'All')}</button>
+    </div>`;
+}
+
+function switchOchatType(type) {
+  if (type === _ochatType) return;
+  _ochatType = type;
+  _ochatSelected.clear();
+  browseOutlookChats();
+}
+
+function toggleOchatSelect(chatId, checked) {
+  if (checked) _ochatSelected.add(chatId);
+  else _ochatSelected.delete(chatId);
+  const el = document.getElementById('connector-browse-outlook_chat');
+  const controls = el?.querySelector('.gmail-bulk-controls');
+  if (controls) controls.outerHTML = _ochatBulkControlsHtml();
+}
+
+function toggleOchatSelectAllLoaded(checked) {
+  const el = document.getElementById('connector-browse-outlook_chat');
+  el.querySelectorAll('.gmail-row-cb').forEach(cb => {
+    cb.checked = checked;
+    if (checked) _ochatSelected.add(cb.dataset.id);
+    else _ochatSelected.delete(cb.dataset.id);
+  });
+  const controls = el.querySelector('.gmail-bulk-controls');
+  if (controls) controls.outerHTML = _ochatBulkControlsHtml();
+}
+
+async function browseOutlookChats(nextLink = '', append = false) {
+  const el = document.getElementById('connector-browse-outlook_chat');
+  if (!append) el.innerHTML = _ochatTabsHtml() + _ochatBulkControlsHtml() + '<div class="connector-browse-note">Loading…</div>';
+  try {
+    const params = new URLSearchParams({ page_size: '50', chat_type: _ochatType });
+    if (nextLink) params.set('next_link', nextLink);
+    const res = await fetch(`/connectors/outlook-chat/chats?${params}`, { headers: connectorHeaders() });
+    if (await handleAuthError(res)) return;
+    if (handleConnectorsLockError(res)) return;
+    const data = await safeJson(res);
+    if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
+
+    const rows = (data.chats || []).map(c => `
+      <div class="connector-item-row gmail-row">
+        <input type="checkbox" class="gmail-row-cb" data-id="${escAttr(c.id)}" ${_ochatSelected.has(c.id) ? 'checked' : ''}
+               onclick="event.stopPropagation(); toggleOchatSelect('${escAttr(c.id)}', this.checked)">
+        <span class="ci-name">💬 ${escHtml(c.name)}</span>
+        <span class="ci-meta">${escHtml((c.chat_type || '').replace(/_/g, ' ').toLowerCase())}</span>
+      </div>`).join('');
+
+    const next = data.next_link || null;
+    const loadMore = next
+      ? `<button class="connector-load-more" onclick="browseOutlookChats('${escAttr(next)}', true)">Load more chats</button>`
+      : '';
+
+    if (append) {
+      const prevBtn = el.querySelector('.connector-load-more');
+      if (prevBtn) prevBtn.remove();
+      el.insertAdjacentHTML('beforeend', rows + loadMore);
+    } else {
+      el.innerHTML = _ochatTabsHtml() + _ochatBulkControlsHtml() +
+        ((rows + loadMore) || '<div class="connector-browse-note">No chats in this tab</div>');
+    }
+  } catch (e) {
+    el.innerHTML = _ochatTabsHtml() + `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
+  }
+}
+
+async function bulkIngestOutlookChat(mode) {
+  const body = { mode, chat_type: _ochatType, session_id: state.sessionId || undefined };
+  let label;
+  if (mode === 'selected') {
+    if (!_ochatSelected.size) return;
+    body.chat_ids = Array.from(_ochatSelected);
+    label = `${body.chat_ids.length} selected chat(s)`;
+  } else {
+    label = `all chats in ${_ochatType}`;
+  }
+
+  closeConnectorModal();
+  const card = new ProgressCard(`Adding ${label}`);
+  try {
+    const res = await fetch('/connectors/outlook-chat/ingest/bulk', {
+      method: 'POST',
+      headers: connectorHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (await handleAuthError(res)) return;
+    if (handleConnectorsLockError(res)) return;
+    if (!res.ok) {
+      const data = await safeJson(res);
+      throw new Error(data?.detail || `Server error ${res.status}`);
+    }
+    await readSSEStream(res, (ev) => handleProgressEvent(card, ev));
+    _ochatSelected.clear();
+  } catch (e) {
+    card.fail(e.message);
+    toast(e.message, 'error');
+  }
 }
 
 /* ── Google Drive browser ────────────────────────────────────── */
@@ -1267,7 +2146,8 @@ async function loadGoogleDriveFolder(pageToken = '', append = false) {
     const params = new URLSearchParams({ max_results: '100', q });
     if (pageToken) params.set('page_token', pageToken);
     const res = await fetch(`/connectors/google-drive/files?${params}`, { headers: connectorHeaders() });
-    if (handleAuthError(res)) return;
+    if (await handleAuthError(res)) return;
+    if (handleConnectorsLockError(res)) return;
     const data = await safeJson(res);
     if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
 
@@ -1303,101 +2183,6 @@ async function loadGoogleDriveFolder(pageToken = '', append = false) {
 
 async function ingestGoogleDriveFile(fileId, name) {
   await runConnectorIngest('google_drive', { file_id: fileId }, name);
-}
-
-/* ── Jira browser ─────────────────────────────────────────────── */
-async function browseJiraProjects() {
-  await renderConnectorBrowse(
-    'connector-browse-jira',
-    '/connectors/jira/projects',
-    data => (data.projects || []).map(p => `
-      <div class="connector-item-row is-folder" onclick="browseJiraIssues('${escAttr(p.key)}', '${escAttr(p.name)}')">
-        <span class="ci-name">📁 ${escHtml(p.name)}</span>
-        <span class="ci-meta">${escHtml(p.key)}</span>
-      </div>`).join('') || '<div class="connector-browse-note">No projects</div>',
-  );
-}
-
-async function browseJiraIssues(projectKey, projectName) {
-  const jql = `project = ${projectKey} order by created DESC`;
-  await renderConnectorBrowse(
-    'connector-browse-jira',
-    `/connectors/jira/issues?jql=${encodeURIComponent(jql)}&max_results=20`,
-    data => {
-      const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseJiraProjects()">Projects</a> / ${escHtml(projectName)}</div>`;
-      const rows = (data.issues || []).map(i => `
-        <div class="connector-item-row" onclick="ingestJiraIssue('${escAttr(i.key)}', '${escAttr(i.summary)}')">
-          <span class="ci-name">🎫 ${escHtml(i.key)} - ${escHtml(i.summary)}</span>
-          <span class="ci-meta">${escHtml(i.status)}</span>
-        </div>`).join('') || '<div class="connector-browse-note">No issues in this project</div>';
-      return crumbs + rows;
-    },
-  );
-}
-
-async function ingestJiraIssue(issueKey, summary) {
-  await runConnectorIngest('jira', { issue_key: issueKey }, `${issueKey} - ${summary}`);
-}
-
-/* ── ServiceNow browser ───────────────────────────────────────── */
-// Flat list - no drill-down needed, pick an incident straight from the list.
-async function browseServiceNowIncidents() {
-  await renderConnectorBrowse(
-    'connector-browse-servicenow',
-    '/connectors/servicenow/incidents?max_results=25',
-    data => (data.incidents || []).map(i => `
-      <div class="connector-item-row" onclick="ingestServiceNowIncident('${escAttr(i.sys_id)}', '${escAttr(i.number)}', '${escAttr(i.short_description)}')">
-        <span class="ci-name">🛠️ ${escHtml(i.number)} - ${escHtml(i.short_description)}</span>
-        <span class="ci-meta">${escHtml(i.state)}${i.priority ? ' · ' + escHtml(i.priority) : ''}</span>
-      </div>`).join('') || '<div class="connector-browse-note">No incidents</div>',
-  );
-}
-
-async function ingestServiceNowIncident(sysId, number, shortDescription) {
-  await runConnectorIngest('servicenow', { sys_id: sysId }, `${number} - ${shortDescription}`);
-}
-
-/* ── Salesforce browser ───────────────────────────────────────── */
-const SF_CATEGORIES = [
-  { key: 'accounts', sobject: 'Account', label: 'Accounts' },
-  { key: 'leads', sobject: 'Lead', label: 'Leads' },
-  { key: 'opportunities', sobject: 'Opportunity', label: 'Opportunities' },
-];
-
-function browseSalesforceCategories() {
-  const el = document.getElementById('connector-browse-salesforce');
-  el.innerHTML = SF_CATEGORIES.map(c => `
-    <div class="connector-item-row is-folder" onclick="browseSalesforceRecords('${c.key}')">
-      <span class="ci-name">📁 ${escHtml(c.label)}</span>
-    </div>`).join('');
-}
-
-function sfRecordMeta(sobject, r) {
-  if (sobject === 'Account') return r.Industry || r.Type || '';
-  if (sobject === 'Lead') return [r.Company, r.Status].filter(Boolean).join(' - ');
-  if (sobject === 'Opportunity') return [r.StageName, r.Amount != null ? `$${r.Amount.toLocaleString()}` : null].filter(Boolean).join(' - ');
-  return '';
-}
-
-async function browseSalesforceRecords(categoryKey) {
-  const cat = SF_CATEGORIES.find(c => c.key === categoryKey);
-  await renderConnectorBrowse(
-    'connector-browse-salesforce',
-    `/connectors/salesforce/${cat.key}?max_results=20`,
-    data => {
-      const crumbs = `<div class="connector-breadcrumb"><a class="crumb" onclick="browseSalesforceCategories()">Salesforce</a> / ${escHtml(cat.label)}</div>`;
-      const rows = (data.records || []).map(r => `
-        <div class="connector-item-row" onclick="ingestSalesforceRecord('${escAttr(cat.sobject)}', '${escAttr(r.Id)}', '${escAttr(r.Name || r.Id)}')">
-          <span class="ci-name">${escHtml(r.Name || r.Id)}</span>
-          <span class="ci-meta">${escHtml(sfRecordMeta(cat.sobject, r))}</span>
-        </div>`).join('') || `<div class="connector-browse-note">No ${escHtml(cat.label.toLowerCase())}</div>`;
-      return crumbs + rows;
-    },
-  );
-}
-
-async function ingestSalesforceRecord(sobject, recordId, name) {
-  await runConnectorIngest('salesforce', { sobject, record_id: recordId }, name);
 }
 
 /* ── SharePoint browser ───────────────────────────────────────── */
@@ -1580,13 +2365,18 @@ async function ingestAzureDevOpsFile(project, repoId, path) {
 
 /* ── Shared ingest call ──────────────────────────────────────── */
 async function runConnectorIngest(provider, body, filename) {
-  toast(`Adding ${filename}…`, 'info');
-  // The backend does dedup+parse+chunk+embed as one blocking call with no
-  // progress events (see app/connectors/pipeline_bridge.py) - if it's still
-  // running after a few seconds, reassure the user instead of going silent.
-  const stillProcessingTimer = setTimeout(() => {
-    toast(`Still processing ${filename}… parsing and embedding can take a moment`, 'info');
-  }, 3000);
+  // Shared by every connector that ingests a single file in one blocking
+  // call with no SSE progress (github, google_drive, sharepoint, teams,
+  // azure_devops - see app/connectors/pipeline_bridge.py). This used to
+  // just show a toast, which auto-dismisses after 4s and was easy to miss
+  // if parsing+embedding took longer than that - switched to the same
+  // persistent ProgressCard every other ingest path uses (uploads, Gmail/
+  // Outlook single-email, the Gmail/Google Chat/Outlook/Outlook Chat bulk
+  // endpoints), so there's always a visible "Processing… -> done" state.
+  closeConnectorModal();
+  const card = new ProgressCard(`Adding ${filename}`);
+  card.addStep('connector_single', `Processing ${filename}...`);
+  const t0 = Date.now();
   try {
     const res = await fetch(`/connectors/${provider}/ingest`, {
       method: 'POST',
@@ -1597,15 +2387,18 @@ async function runConnectorIngest(provider, body, filename) {
       // gets it for free.
       body: JSON.stringify({ ...body, session_id: state.sessionId || undefined }),
     });
-    clearTimeout(stillProcessingTimer);
-    if (handleAuthError(res)) return;
+    if (await handleAuthError(res)) return;
+    if (handleConnectorsLockError(res)) return;
     const data = await safeJson(res);
     if (!res.ok) throw new Error(data?.detail || `Server error ${res.status}`);
+    const elapsed = (Date.now() - t0) / 1000;
+    card.doneStep('connector_single', data.filename || filename, elapsed);
+    card.complete(elapsed, `${filename} added - ready to chat!`);
     onProcessed(data.session_id);
-    closeConnectorModal();
-    toast(`${filename} added - ready to chat!`, 'success');
+    toast('Ready to chat!', 'success');
   } catch (e) {
-    clearTimeout(stillProcessingTimer);
+    card.errorStep('connector_single', e.message);
+    card.fail(e.message);
     toast(e.message, 'error');
   }
 }
@@ -1641,6 +2434,7 @@ async function sendMessage() {
 
   input.value = '';
   autoResize(input);
+  clearWelcome();
   appendMessage('user', question);
   showTyping(true);
 
@@ -1652,9 +2446,13 @@ async function sendMessage() {
         'X-Advanced-Mode':  state.advancedMode  ? 'true' : 'false',
         'X-Thinking-Mode':  state.thinkingMode  ? 'true' : 'false',
       }),
-      body: JSON.stringify({ session_id: state.sessionId, question }),
+      body: JSON.stringify({
+        session_id: state.sessionId,
+        question,
+        knowledge_base_id: state.selectedKnowledgeBaseId || undefined,
+      }),
     });
-    if (handleAuthError(res)) return;
+    if (await handleAuthError(res)) return;
     const data = await safeJson(res);
     if (!res.ok) {
       const detail = data?.detail;
@@ -1774,7 +2572,10 @@ function resetSession() {
   state.sessionId  = null;
   state.isReady    = false;
   state.files      = [];
+  state.selectedKnowledgeBaseId = null;
+  localStorage.removeItem('rag_session_id');
   renderFileList();
+  renderKbList();
 
   document.getElementById('session-badge').classList.add('hidden');
   document.getElementById('reset-btn').classList.add('hidden');

@@ -1,13 +1,12 @@
 """Shared OAuth2 "authorization code + refresh token" HTTP plumbing, used by
-the Gmail, Google Drive, and Salesforce connectors - all three implement the
+the Gmail and Google Drive connectors - both implement the
 same flow (POST to a token endpoint, track expiry, refresh, persist) against
 different providers. This class handles the mechanical parts that were
-previously triplicated nearly verbatim: the token-endpoint POST, expiry
+previously duplicated nearly verbatim: the token-endpoint POST, expiry
 math, and token_store persistence. Each connector keeps its own thin
 exchange/refresh/get_valid_token methods so its provider-specific error
-wording and behavior (e.g. Salesforce tolerating a stale access token when
-no refresh token exists, where Gmail/Drive instead raise) stays unchanged -
-this is deliberately not a one-size-fits-all interface over those parts.
+wording and behavior stays unchanged - this is deliberately not a
+one-size-fits-all interface over those parts.
 """
 import json
 import urllib.parse

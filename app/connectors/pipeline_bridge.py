@@ -16,11 +16,11 @@ same signature:
     async def ingest_bytes(provider: str, content: bytes, filename: str,
                             user_id: str, client_token: str) -> dict
 
-- `provider`: the connector id the bytes came from (e.g. "github", "jira").
+- `provider`: the connector id the bytes came from (e.g. "github", "gmail").
   Only used here as metadata tagged onto the resulting chunks/response.
 - `content`: the raw file bytes (or, for record-oriented connectors like
-  Jira/ServiceNow/Salesforce/Teams that render a record to plain text
-  instead of exposing a raw file, the UTF-8-encoded rendered text).
+  Teams that render a record to plain text instead of exposing a raw file,
+  the UTF-8-encoded rendered text).
 - `filename`: a filename (with a real extension) for the content, used for
   extension/size validation and for display.
 - `user_id`: the authenticated user id, used for connector-token lookups and
@@ -54,6 +54,31 @@ from app.services.vector_store import get_vector_store
 from app.routers.upload import ALLOWED_EXTENSIONS, _add_texts_batched_parallel
 
 logger = logging.getLogger(__name__)
+
+_URL_RE = re.compile(r'https?://[^\s<>\]\)"]+')
+
+
+async def _scrape_links_in_text(text: str, max_links: int = 3) -> str:
+    """Finds plain URLs inside an email/chat-message's text and scrapes each
+    one's page content through the existing scrape_url() pipeline, so a
+    linked doc/page gets embedded alongside the message referencing it -
+    not just the bare URL string. Capped at max_links per message to bound
+    latency; a link that fails to scrape is noted inline, not fatal to the
+    rest of the ingest."""
+    from app.services.ingestion import scrape_url
+
+    urls = list(dict.fromkeys(_URL_RE.findall(text or "")))[:max_links]
+    if not urls:
+        return ""
+    parts = []
+    for url in urls:
+        try:
+            scraped = await scrape_url(url)
+            parts.append(f"\n--- Linked page: {url} ---\n{scraped}")
+        except Exception as e:
+            logger.warning(f"[CONNECTORS] Could not scrape linked URL {url}: {e}")
+            parts.append(f"\n--- Linked page: {url} (could not fetch: {e}) ---")
+    return "".join(parts)
 
 
 async def ingest_bytes(provider: str, content: bytes, filename: str, user_id: str, client_token: str,
@@ -151,7 +176,7 @@ async def ingest_bytes(provider: str, content: bytes, filename: str, user_id: st
                 content_hash, first_c, mid_c, last_c, avg_conf, source_type="connector",
             )
             # Without this, a connector fetch slower than the periodic cleanup's
-            # 5-minute threshold (large SharePoint/Drive file, slow Jira/Salesforce
+            # 5-minute threshold (large SharePoint/Drive file, slow Gmail
             # call) would have its pending row marked "failed" by the janitor
             # while still legitimately in progress - same registry /upload/files
             # already uses to protect its own in-flight uploads.
@@ -225,11 +250,14 @@ async def ingest_gmail_message(message_id: str, user_id: str, client_token: str,
     connector = get_gmail_connector(user_id)
     message = connector.get_message(message_id)
 
+    attachment_names = [a.get("filename") or "attachment" for a in message.get("attachments", [])]
     parts = [
         f"Subject: {message.get('subject', '')}",
         f"From: {message.get('from', '')}",
         f"To: {message.get('to', '')}",
+        f"Cc: {message.get('cc', '')}",
         f"Date: {message.get('date', '')}",
+        f"Attachments: {', '.join(attachment_names) if attachment_names else 'None'}",
         "",
         message.get("body_text", ""),
     ]
@@ -244,6 +272,10 @@ async def ingest_gmail_message(message_id: str, user_id: str, client_token: str,
             logger.warning(f"[CONNECTORS][GMAIL] Could not extract text from attachment {att_filename}: {e}")
             parts.append(f"\n--- Attachment: {att_filename} (could not extract text: {e}) ---")
 
+    link_text = await _scrape_links_in_text(message.get("body_text", ""))
+    if link_text:
+        parts.append(link_text)
+
     combined_text = "\n".join(parts)
 
     safe_subject = re.sub(r"[^A-Za-z0-9 ._-]+", "", message.get("subject", "") or "").strip()[:60] or "email"
@@ -253,3 +285,155 @@ async def ingest_gmail_message(message_id: str, user_id: str, client_token: str,
         provider="gmail", content=combined_text.encode("utf-8"), filename=filename,
         user_id=user_id, client_token=client_token, session_id=session_id,
     )
+
+
+async def ingest_google_chat_space(space_id: str, user_id: str, client_token: str,
+                                    session_id: str | None = None) -> dict:
+    """Ingests every message in one Google Chat space/chat as one combined
+    document - sender + timestamp + text for each message, plus every
+    attachment's extracted text and any linked page's scraped content -
+    mirroring ingest_gmail_message's "whole conversation as one document"
+    approach, so the chatbot can answer who-said-what, attachment, and
+    linked-page questions about a chat the same way it can for an email."""
+    from app.connectors.clients.google_chat import get_google_chat_connector
+
+    connector = get_google_chat_connector(user_id)
+    messages = connector.get_all_messages(space_id)
+
+    lines: list[str] = []
+    for msg in messages:
+        sender = msg.get("sender") or {}
+        sender_name = sender.get("displayName") or sender.get("name", "unknown")
+        created = msg.get("createTime", "")
+        text = msg.get("text", "") or ""
+        lines.append(f"[{created}] {sender_name}: {text}")
+
+        for att in msg.get("attachment", []) or []:
+            att_filename = att.get("contentName") or "attachment"
+            resource_name = (att.get("attachmentDataRef") or {}).get("resourceName")
+            if not resource_name:
+                continue
+            try:
+                att_content, _ = connector.download_attachment(resource_name, att_filename)
+                att_text, _ = await parse_file(att_content, att_filename)
+                lines.append(f"\n--- Attachment: {att_filename} ---\n{att_text}")
+            except Exception as e:
+                logger.warning(f"[CONNECTORS][GOOGLE_CHAT] Could not extract text from attachment {att_filename}: {e}")
+                lines.append(f"\n--- Attachment: {att_filename} (could not extract text: {e}) ---")
+
+        link_text = await _scrape_links_in_text(text)
+        if link_text:
+            lines.append(link_text)
+
+    combined_text = "\n".join(lines) if lines else "(empty chat/space - no messages)"
+
+    safe_name = re.sub(r"[^A-Za-z0-9 ._-]+", "", space_id).strip()[:60] or "chat"
+    filename = f"Google Chat - {safe_name}.txt"
+
+    return await ingest_bytes(
+        provider="google_chat", content=combined_text.encode("utf-8"), filename=filename,
+        user_id=user_id, client_token=client_token, session_id=session_id,
+    )
+
+
+async def ingest_outlook_message(message_id: str, user_id: str, client_token: str,
+                                  session_id: str | None = None) -> dict:
+    """Ingests a whole Outlook email - body text plus every attachment's
+    extracted text and any linked page's scraped content - as one combined
+    document, mirroring ingest_gmail_message exactly (same header block
+    shape: Subject/From/To/Cc/Date/Attachments, then the body)."""
+    from app.connectors.clients.outlook import get_outlook_connector
+
+    connector = get_outlook_connector(user_id)
+    message = connector.get_message(message_id)
+
+    attachment_names = [a.get("filename") or "attachment" for a in message.get("attachments", [])]
+    parts = [
+        f"Subject: {message.get('subject', '')}",
+        f"From: {message.get('from', '')}",
+        f"To: {message.get('to', '')}",
+        f"Cc: {message.get('cc', '')}",
+        f"Date: {message.get('date', '')}",
+        f"Attachments: {', '.join(attachment_names) if attachment_names else 'None'}",
+        "",
+        message.get("body_text", ""),
+    ]
+
+    for att in message.get("attachments", []):
+        att_filename = att.get("filename") or "attachment"
+        try:
+            att_content, _ = connector.download_attachment(message_id, att["attachment_id"], att_filename)
+            att_text, _ = await parse_file(att_content, att_filename)
+            parts.append(f"\n--- Attachment: {att_filename} ---\n{att_text}")
+        except Exception as e:
+            logger.warning(f"[CONNECTORS][OUTLOOK] Could not extract text from attachment {att_filename}: {e}")
+            parts.append(f"\n--- Attachment: {att_filename} (could not extract text: {e}) ---")
+
+    link_text = await _scrape_links_in_text(message.get("body_text", ""))
+    if link_text:
+        parts.append(link_text)
+
+    combined_text = "\n".join(parts)
+
+    safe_subject = re.sub(r"[^A-Za-z0-9 ._-]+", "", message.get("subject", "") or "").strip()[:60] or "email"
+    filename = f"{safe_subject} ({message_id[:8]}).txt"
+
+    return await ingest_bytes(
+        provider="outlook", content=combined_text.encode("utf-8"), filename=filename,
+        user_id=user_id, client_token=client_token, session_id=session_id,
+    )
+
+
+async def ingest_outlook_chat(chat_id: str, user_id: str, client_token: str,
+                               session_id: str | None = None) -> dict:
+    """Ingests every message in one Outlook/Teams personal chat as one
+    combined document - sender + timestamp + text per message, plus any
+    linked page's scraped content - mirroring ingest_google_chat_space.
+    Attachments on a Teams chat message are SharePoint/OneDrive links
+    (contentUrl) rather than inline bytes, so they're treated as links to
+    scrape rather than downloaded directly."""
+    from app.connectors.clients.outlook_chat import get_outlook_chat_connector
+
+    connector = get_outlook_chat_connector(user_id)
+    messages = connector.get_all_messages(chat_id)
+
+    lines: list[str] = []
+    for msg in messages:
+        sender = ((msg.get("from") or {}).get("user") or {})
+        sender_name = sender.get("displayName", "unknown")
+        created = msg.get("createdDateTime", "")
+        body = msg.get("body") or {}
+        text = body.get("content", "") if body.get("contentType") == "text" else _strip_html_fragment(body.get("content", ""))
+        lines.append(f"[{created}] {sender_name}: {text}")
+
+        for att in msg.get("attachments", []) or []:
+            att_name = att.get("name") or "attachment"
+            content_url = att.get("contentUrl")
+            if content_url:
+                lines.append(f"\n--- Attachment: {att_name} ({content_url}) ---")
+
+        link_text = await _scrape_links_in_text(text)
+        if link_text:
+            lines.append(link_text)
+
+    combined_text = "\n".join(lines) if lines else "(empty chat - no messages)"
+
+    safe_name = re.sub(r"[^A-Za-z0-9 ._-]+", "", chat_id).strip()[:60] or "chat"
+    filename = f"Outlook Chat - {safe_name}.txt"
+
+    return await ingest_bytes(
+        provider="outlook_chat", content=combined_text.encode("utf-8"), filename=filename,
+        user_id=user_id, client_token=client_token, session_id=session_id,
+    )
+
+
+def _strip_html_fragment(html: str) -> str:
+    """Same best-effort HTML->text fallback as outlook.py's module-level
+    helper, duplicated here (not imported) to keep pipeline_bridge's only
+    dependency on outlook.py limited to the lazy get_outlook_connector()
+    import above, consistent with how this file treats every other client
+    module as an opaque "fetch bytes" source."""
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", html or "", flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()

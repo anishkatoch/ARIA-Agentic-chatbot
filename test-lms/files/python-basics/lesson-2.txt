@@ -1,6 +1,0 @@
-Python Basics - Lesson 2
-
-Topics:
-- Lists
-- Tuples
-- Dictionaries
