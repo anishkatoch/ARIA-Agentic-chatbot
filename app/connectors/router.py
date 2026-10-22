@@ -509,14 +509,20 @@ class GmailBulkIngestRequest(BaseModel):
 
 
 @router.post("/gmail/ingest/bulk")
-async def gmail_ingest_bulk(request: Request, body: GmailBulkIngestRequest):
+async def gmail_ingest_bulk(request: Request, body: GmailBulkIngestRequest,
+                             x_client_token: str = Header(default=None)):
     """Ingests many Gmail messages in one call, streaming SSE progress
     events (reusing the same event shape the file-upload SSE stream emits -
     see app.routers.upload.upload_files - so the frontend's existing
     ProgressCard/handleProgressEvent can render it unchanged). Each message
     goes through pipeline_bridge.ingest_gmail_message exactly as the
     single-email ingest path does (body + every attachment's extracted
-    text), so dedup/chunk/embed behavior is identical - this just loops."""
+    text), so dedup/chunk/embed behavior is identical - this just loops.
+
+    `x_client_token`: the browser's anonymous upload identity (see
+    dedup_svc.resolve_session_id's alt_client_token docstring) - forwarded so
+    attaching this connector to a chat that already has a plain file upload
+    in it joins that same session instead of silently starting a new one."""
     user_id = _user_id(request)
     client_token = f"connector:{user_id}"
     connector = get_gmail_connector(user_id)
@@ -562,6 +568,7 @@ async def gmail_ingest_bulk(request: Request, body: GmailBulkIngestRequest):
             try:
                 result = await pipeline_bridge.ingest_gmail_message(
                     message_id=message_id, user_id=user_id, client_token=client_token, session_id=session_id,
+                    alt_client_token=x_client_token,
                 )
                 session_id = result["session_id"]
                 ingested += 1
@@ -663,14 +670,17 @@ class GoogleChatBulkIngestRequest(BaseModel):
 
 
 @router.post("/google-chat/ingest/bulk")
-async def google_chat_ingest_bulk(request: Request, body: GoogleChatBulkIngestRequest):
+async def google_chat_ingest_bulk(request: Request, body: GoogleChatBulkIngestRequest,
+                                   x_client_token: str = Header(default=None)):
     """Ingests many Google Chat spaces/chats in one call, streaming SSE
     progress events in the same shape the Gmail bulk endpoint and the
     file-upload SSE stream use (see app.routers.upload.upload_files), so the
     frontend's existing ProgressCard/handleProgressEvent renders it
     unchanged. Each space goes through pipeline_bridge.ingest_google_chat_space
     (every message + attachment + linked page in that space, combined into
-    one document) exactly as a single-space ingest would - this just loops."""
+    one document) exactly as a single-space ingest would - this just loops.
+
+    `x_client_token`: see gmail_ingest_bulk's docstring above."""
     user_id = _user_id(request)
     client_token = f"connector:{user_id}"
     connector = get_google_chat_connector(user_id)
@@ -713,6 +723,7 @@ async def google_chat_ingest_bulk(request: Request, body: GoogleChatBulkIngestRe
             try:
                 result = await pipeline_bridge.ingest_google_chat_space(
                     space_id=space_id, user_id=user_id, client_token=client_token, session_id=session_id,
+                    alt_client_token=x_client_token,
                 )
                 session_id = result["session_id"]
                 ingested += 1
@@ -853,7 +864,8 @@ class OutlookBulkIngestRequest(BaseModel):
 
 
 @router.post("/outlook/ingest/bulk")
-async def outlook_ingest_bulk(request: Request, body: OutlookBulkIngestRequest):
+async def outlook_ingest_bulk(request: Request, body: OutlookBulkIngestRequest,
+                               x_client_token: str = Header(default=None)):
     """Mirrors /connectors/gmail/ingest/bulk exactly (same modes, same SSE
     event shape) - see that endpoint's docstring. Each message goes through
     pipeline_bridge.ingest_outlook_message (body + every attachment's
@@ -905,6 +917,7 @@ async def outlook_ingest_bulk(request: Request, body: OutlookBulkIngestRequest):
             try:
                 result = await pipeline_bridge.ingest_outlook_message(
                     message_id=message_id, user_id=user_id, client_token=client_token, session_id=session_id,
+                    alt_client_token=x_client_token,
                 )
                 session_id = result["session_id"]
                 ingested += 1
@@ -991,7 +1004,8 @@ class OutlookChatBulkIngestRequest(BaseModel):
 
 
 @router.post("/outlook-chat/ingest/bulk")
-async def outlook_chat_ingest_bulk(request: Request, body: OutlookChatBulkIngestRequest):
+async def outlook_chat_ingest_bulk(request: Request, body: OutlookChatBulkIngestRequest,
+                                    x_client_token: str = Header(default=None)):
     """Mirrors /connectors/google-chat/ingest/bulk exactly (same modes, same
     SSE event shape) - see that endpoint's docstring. Each chat goes through
     pipeline_bridge.ingest_outlook_chat, looped the same way."""
@@ -1037,6 +1051,7 @@ async def outlook_chat_ingest_bulk(request: Request, body: OutlookChatBulkIngest
             try:
                 result = await pipeline_bridge.ingest_outlook_chat(
                     chat_id=chat_id, user_id=user_id, client_token=client_token, session_id=session_id,
+                    alt_client_token=x_client_token,
                 )
                 session_id = result["session_id"]
                 ingested += 1
@@ -1290,7 +1305,8 @@ async def _fetch_connector_file(provider: str, body: dict, user_id: str) -> tupl
 
 
 @router.post("/{provider}/ingest")
-async def ingest_connector_file(provider: str, request: Request, body: dict = Body(...)):
+async def ingest_connector_file(provider: str, request: Request, body: dict = Body(...),
+                                 x_client_token: str = Header(default=None)):
     """Bridges a connector-sourced file into the existing RAG ingestion
     pipeline (the same parse/chunk/embed/dedup path /upload/files uses), so
     the result is a normal session_id the existing /chat endpoint can use.
@@ -1308,6 +1324,10 @@ async def ingest_connector_file(provider: str, request: Request, body: dict = Bo
     isolated one - the frontend sends its current session_id once a chat is
     underway, so adding a second/third connector file doesn't orphan the
     ones added before it.
+
+    `x_client_token`: see gmail_ingest_bulk's docstring above - forwarded as
+    resolve_session_id's alt_client_token so this still joins the session
+    even when it was started by a plain (non-connector) file upload.
     """
     user_id = _user_id(request)
     client_token = f"connector:{user_id}"
@@ -1319,6 +1339,7 @@ async def ingest_connector_file(provider: str, request: Request, body: dict = Bo
             raise HTTPException(400, "message_id is required for gmail")
         return await pipeline_bridge.ingest_gmail_message(
             message_id=message_id, user_id=user_id, client_token=client_token, session_id=session_id,
+            alt_client_token=x_client_token,
         )
 
     content, filename = await _fetch_connector_file(provider, body, user_id)
@@ -1326,5 +1347,5 @@ async def ingest_connector_file(provider: str, request: Request, body: dict = Bo
     return await pipeline_bridge.ingest_bytes(
         provider=provider, content=content, filename=filename,
         user_id=user_id, client_token=client_token,
-        session_id=session_id,
+        session_id=session_id, alt_client_token=x_client_token,
     )
