@@ -168,7 +168,24 @@ async def me(request: Request):
     user = auth_service.verify_token(token)
     if not user:
         raise HTTPException(401, "Invalid or expired token")
-    return user
+    # Department roles (hr/it/finance/...) are a separate concept from
+    # `role` (user/guest/admin, the account type) above - see
+    # roles_service's module docstring. Looked up fresh on every call so a
+    # role change by the admin is reflected the next time the user's
+    # settings panel (or anything else calling /auth/me) checks, without
+    # requiring them to sign out and back in.
+    #
+    # A transient DB hiccup here must not take down /auth/me's whole
+    # response - the account's identity (id/email/name) is still valid and
+    # more important than the roles list, so this degrades to roles: []
+    # and logs the failure, rather than 500ing the entire call.
+    from app.services import roles_service
+    try:
+        roles = roles_service.get_user_roles(user.get("email"))
+    except Exception as e:
+        logger.warning(f"[AUTH] /me: roles lookup failed for {user.get('email')}: {e}")
+        roles = []
+    return {**user, "roles": roles}
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────

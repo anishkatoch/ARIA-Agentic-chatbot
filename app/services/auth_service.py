@@ -1,4 +1,6 @@
 import logging
+import threading
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 
@@ -21,6 +23,126 @@ def _supabase():
         from supabase import create_client
         _supabase_client = create_client(cfg.supabase_url, cfg.supabase_anon_key)
     return _supabase_client
+
+
+# ── Supabase Admin API (service-role key - never exposed to the browser) ──────
+# Used only by the /admin user-management endpoints (app/routers/admin.py),
+# never by anything a regular user's request can reach - the service role
+# key bypasses RLS and can act as any user, so a separate client instance
+# (never the anon-key one above) keeps that capability from leaking into
+# the normal request path by accident.
+
+_supabase_admin_client = None
+
+def _supabase_admin():
+    global _supabase_admin_client
+    if _supabase_admin_client is None:
+        if not cfg.supabase_url or not cfg.supabase_service_key:
+            raise RuntimeError(
+                "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in .env "
+                "to manage users from the admin dashboard"
+            )
+        from supabase import create_client
+        _supabase_admin_client = create_client(cfg.supabase_url, cfg.supabase_service_key)
+    return _supabase_admin_client
+
+
+# The admin dashboard's Users tab previously made a live Supabase network
+# round-trip on every single tab switch - this is the actual slowness, not
+# just "things feeling slow": Supabase's admin API is a real HTTP call
+# (tens to hundreds of ms), and the account list rarely changes between
+# switches. A short in-process cache makes repeat loads near-instant
+# without ever showing data more than ADMIN_USERS_CACHE_TTL_S stale, and is
+# invalidated immediately on admin_create_user so a freshly created account
+# always shows up right away rather than waiting out the TTL.
+ADMIN_USERS_CACHE_TTL_S = 30
+_admin_users_cache: dict = {"data": None, "expires_at": 0.0}
+_admin_users_cache_lock = threading.Lock()
+
+
+def _invalidate_admin_users_cache() -> None:
+    with _admin_users_cache_lock:
+        _admin_users_cache["data"] = None
+        _admin_users_cache["expires_at"] = 0.0
+
+
+def admin_list_users(per_page: int = 200, force_refresh: bool = False) -> list[dict]:
+    """Every Supabase-registered user (email + password accounts, and
+    Google/Microsoft OAuth accounts - both land in the same Supabase user
+    table). Capped at `per_page` in one page - this app's user count is
+    small (an internal tool, not a public product), so one page comfortably
+    covers it; raise the cap before this needs real pagination.
+
+    This performs a real network call to Supabase - callers on the async
+    request path (app/routers/admin.py) must run it via
+    `await asyncio.to_thread(...)`, never call it directly, or it blocks
+    the whole event loop (every other in-flight request - chat, uploads,
+    everyone else) for the duration of that HTTP round-trip."""
+    if not force_refresh:
+        with _admin_users_cache_lock:
+            cached = _admin_users_cache["data"]
+            if cached is not None and time.monotonic() < _admin_users_cache["expires_at"]:
+                return cached
+
+    admin = _supabase_admin().auth.admin
+    users = admin.list_users(page=1, per_page=per_page)
+    result = [
+        {
+            "id":         u.id,
+            "email":      u.email,
+            "name":       (u.user_metadata or {}).get("name", (u.email or "").split("@")[0]),
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+        }
+        for u in users
+    ]
+    with _admin_users_cache_lock:
+        _admin_users_cache["data"] = result
+        _admin_users_cache["expires_at"] = time.monotonic() + ADMIN_USERS_CACHE_TTL_S
+    return result
+
+
+def admin_create_user(email: str, password: str, name: str | None = None) -> dict:
+    """Creates a pre-confirmed Supabase account (email_confirm=True) - no
+    OTP email round-trip, unlike the public /auth/signup flow. Used by the
+    admin's "create user" action, where the admin is vouching for the
+    account directly instead of the user self-registering."""
+    admin = _supabase_admin().auth.admin
+    try:
+        res = admin.create_user({
+            "email": email,
+            "password": password,
+            "email_confirm": True,
+            "user_metadata": {"name": name} if name else {},
+        })
+    except Exception as e:
+        msg = str(e).lower()
+        if "already registered" in msg or "already exists" in msg or "already been registered" in msg:
+            raise ValueError("An account with this email already exists.")
+        raise ValueError(f"Failed to create user: {e}")
+    if res.user is None:
+        raise ValueError("Failed to create user.")
+    _invalidate_admin_users_cache()  # otherwise this new account wouldn't show up for up to ADMIN_USERS_CACHE_TTL_S
+    logger.info(f"[AUTH][ADMIN] Created user: {email}")
+    return {
+        "id":    res.user.id,
+        "email": res.user.email,
+        "name":  name or email.split("@")[0],
+    }
+
+
+def admin_set_user_password(email: str, password: str) -> None:
+    """Resets an existing Supabase user's password directly (no "forgot
+    password" email round-trip) - used for one-off admin-driven resets.
+    Looks the account up through the cached admin_list_users() instead of
+    its own separate Supabase call, same rationale as there - also a real
+    network call, same async/event-loop caveat applies to callers."""
+    users = admin_list_users()
+    match = next((u for u in users if (u["email"] or "").lower() == email.lower()), None)
+    if match is None:
+        raise ValueError(f"No account found for {email}")
+    admin = _supabase_admin().auth.admin
+    admin.update_user_by_id(match["id"], {"password": password})
+    logger.info(f"[AUTH][ADMIN] Password reset for: {email}")
 
 
 # ── Guest JWT (no Supabase, no email verification) ────────────────────────────

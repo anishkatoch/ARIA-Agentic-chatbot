@@ -101,8 +101,12 @@ _cache_lock = threading.Lock()
 _CACHE_MAX  = 256  # max entries before evicting oldest
 
 
-def _cache_key(session_id: str, question: str, advanced: bool, thinking: bool = False) -> str:
-    raw = f"{session_id}|{question.strip().lower()}|{advanced}|{thinking}"
+def _cache_key(session_id: str, question: str, advanced: bool, thinking: bool = False,
+                extra_session_ids: tuple[str, ...] = ()) -> str:
+    # extra_session_ids (attached knowledge bases) must be part of the key -
+    # otherwise asking the same question with a different KB attached would
+    # serve back a cached answer built from a completely different source.
+    raw = f"{session_id}|{question.strip().lower()}|{advanced}|{thinking}|{','.join(sorted(extra_session_ids))}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -794,8 +798,9 @@ def check_intent(question: str, history: list[dict] | None = None) -> bool:
 
 class RAGState(TypedDict):
     question:       str
-    session_id:     str
-    vectorstore:    object
+    # Personal/upload session first, then one entry per attached knowledge
+    # base: [{"vectorstore": ..., "session_id": ..., "label": str | None}, ...]
+    sources:        list[dict]
     queries:        list[str]
     vector_docs:    list
     graph_context:  str
@@ -849,17 +854,51 @@ def _retrieve_for_question(vectorstore, session_id: str, question: str, queries:
     return _hybrid_retrieve(vectorstore, session_id, queries)
 
 
+def _merge_source_docs(sources: list[dict], question: str, queries: list[str]) -> list:
+    """Runs the existing single-source retrieval independently per attached
+    source (personal session + each attached knowledge base), tags every
+    resulting chunk with which source it came from, and - only when more
+    than one source is attached - merges the per-source result sets into one
+    ranked pool via RRF and a final rerank. A single source skips that merge/
+    rerank layer entirely, so the common case (nothing attached) costs
+    exactly what it did before multi-source support existed."""
+    if len(sources) == 1:
+        src = sources[0]
+        docs = _retrieve_for_question(src["vectorstore"], src["session_id"], question, queries)
+        for d in docs:
+            d.metadata["origin_label"] = src.get("label")
+        return docs
+
+    per_source_lists = []
+    for src in sources:
+        docs = _retrieve_for_question(src["vectorstore"], src["session_id"], question, queries)
+        for d in docs:
+            d.metadata["origin_label"] = src.get("label")
+        per_source_lists.append(docs)
+
+    merged = _rrf_merge(per_source_lists, top_k=cfg.rerank_top_n * len(sources))
+    return _rerank(question, merged, cfg.rerank_top_n)
+
+
 def node_simple_retrieve(state: RAGState) -> RAGState:
-    docs = _retrieve_for_question(state["vectorstore"], state["session_id"], state["question"], state["queries"])
+    docs = _merge_source_docs(state["sources"], state["question"], state["queries"])
     state["vector_docs"]   = docs
     state["graph_context"] = ""
     return state
 
 
+def _label_chunk(doc) -> str:
+    """Prefixes a retrieved chunk with which attached source it came from -
+    a no-op (empty prefix) when only one source is attached, since
+    _merge_source_docs leaves origin_label unset/None in that case."""
+    label = doc.metadata.get("origin_label")
+    return f"[Source: {label}]\n{doc.page_content}" if label else doc.page_content
+
+
 def node_simple_answer(state: RAGState) -> RAGState:
     docs     = state["vector_docs"]
     question = state["question"]
-    context  = "\n\n".join(doc.page_content for doc in docs)
+    context  = "\n\n".join(_label_chunk(doc) for doc in docs)
     history  = state.get("history") or []
     history_block = f"Conversation so far:\n{_history_to_str(history)}\n\n" if history else ""
 
@@ -910,18 +949,26 @@ def node_query_rewrite(state: RAGState) -> RAGState:
 
 
 def node_advanced_retrieve(state: RAGState) -> RAGState:
-    docs = _retrieve_for_question(state["vectorstore"], state["session_id"], state["question"], state["queries"])
+    docs = _merge_source_docs(state["sources"], state["question"], state["queries"])
     state["vector_docs"] = docs
 
-    # Graph retrieval
-    try:
-        from app.services.graph_store import query_graph
-        graph_ctx = query_graph(state["question"], state["session_id"])
-        state["graph_context"] = graph_ctx
-        logger.info(f"[GRAPH] Retrieved graph context length={len(graph_ctx)}")
-    except Exception as e:
-        logger.warning(f"[ADVANCED] Neo4j graph retrieval failed ({e}) - using vector only")
-        state["graph_context"] = ""
+    # Graph retrieval - once per attached source, so one source's Neo4j
+    # failure doesn't wipe out graph context the others successfully returned.
+    from app.services.graph_store import query_graph
+    parts = []
+    for src in state["sources"]:
+        try:
+            ctx = query_graph(state["question"], src["session_id"])
+        except Exception as e:
+            logger.warning(
+                f"[ADVANCED] Neo4j graph retrieval failed for "
+                f"{src.get('label') or 'personal session'} ({e}) - using vector only for it"
+            )
+            continue
+        if ctx:
+            parts.append(f"[{src['label']}]\n{ctx}" if src.get("label") else ctx)
+    state["graph_context"] = "\n\n".join(parts)
+    logger.info(f"[GRAPH] Retrieved graph context length={len(state['graph_context'])}")
 
     return state
 
@@ -929,7 +976,7 @@ def node_advanced_retrieve(state: RAGState) -> RAGState:
 def node_advanced_answer(state: RAGState) -> RAGState:
     docs         = state["vector_docs"]
     question     = state["question"]
-    vector_ctx   = "\n\n".join(doc.page_content for doc in docs)
+    vector_ctx   = "\n\n".join(_label_chunk(doc) for doc in docs)
     graph_ctx    = state.get("graph_context", "")
     fallback_msg = "\n\n⚠ Advanced mode unavailable, using standard mode." if state.get("fallback") else ""
     history      = state.get("history") or []
@@ -991,11 +1038,14 @@ def _build_citations(docs: list) -> list[dict]:
     citations = []
     for i, doc in enumerate(docs):
         citations.append({
-            "source":      doc.metadata.get("source", "unknown"),
-            "chunk_index": doc.metadata.get("chunk_index", i),
-            "page_number": doc.metadata.get("page_number"),
-            "confidence":  doc.metadata.get("confidence"),
-            "preview":     doc.page_content[:150].strip(),
+            "source":         doc.metadata.get("source", "unknown"),
+            "chunk_index":    doc.metadata.get("chunk_index", i),
+            "page_number":    doc.metadata.get("page_number"),
+            "confidence":     doc.metadata.get("confidence"),
+            "preview":        doc.page_content[:150].strip(),
+            # Which attached source this came from ("My uploads", a KB name,
+            # etc.) - None when only one source was attached.
+            "knowledge_base": doc.metadata.get("origin_label"),
         })
         logger.debug(f"[CITE] source={citations[-1]['source']}, chunk={citations[-1]['chunk_index']}")
     return citations
@@ -1066,11 +1116,85 @@ def _get_advanced_graph():
 
 # ── ReAct agent (Thinking Mode) ───────────────────────────────────────────────
 
+def _slugify(label: str) -> str:
+    slug = re.sub(r'[^a-z0-9]+', '_', label.lower()).strip('_')
+    return slug or "source"
+
+
+def _extra_source_tools(src: dict, collected_docs: list) -> tuple:
+    """Builds a uniquely-named vector_search/read_source tool pair for one
+    attached knowledge base, so the ReAct agent can tell it apart from the
+    personal-session tools (and from other attached KBs) when more than one
+    source is attached. Mirrors _react_tools' own vector_search/read_source
+    exactly, just scoped to this source's vectorstore/session_id and tagging
+    results with this source's label instead of leaving origin_label unset."""
+    vectorstore, session_id, label = src["vectorstore"], src["session_id"], src.get("label")
+    slug = _slugify(label or "kb")
+
+    @tool(f"vector_search_{slug}")
+    def vector_search(query: str) -> str:
+        """Search this knowledge base's document chunks for information
+        relevant to the query. Use this for a specific fact or detail, NOT
+        for "what's in this file/chat/email/inbox" type questions - use the
+        matching read_source tool for those instead."""
+        docs = _hybrid_retrieve(vectorstore, session_id, [query])
+        if not docs:
+            return "No results found."
+        for d in docs:
+            d.metadata["origin_label"] = label
+        collected_docs.extend(docs)
+        return "\n\n---\n\n".join(
+            f"[Source: {d.metadata.get('source','?')} p.{d.metadata.get('page_number','?')}]\n{d.page_content}"
+            for d in docs
+        )
+    vector_search.description = f"(Knowledge base: {label}) {vector_search.description}"
+
+    @tool(f"read_source_{slug}")
+    def read_source(name: str) -> str:
+        """Read a broad slice of ONE specific source within this knowledge
+        base, in its original order - use this whenever the user asks what a
+        file/chat/email/inbox in this knowledge base "contains" or is
+        "about", wants a summary/overview, or asks for key points/risks/
+        takeaways that may not be stated verbatim. Pass the filename (or your
+        best guess at it) - it will be matched against this knowledge base's
+        actual sources. If the user didn't name anything specific and this
+        knowledge base has only one source, pass "this document"."""
+        sources_here = list_session_sources(vectorstore)
+        resolved = _resolve_target_sources(name, sources_here)
+        if not resolved:
+            name_l = name.lower()
+            resolved = [s["source"] for s in sources_here if name_l in s["source"].lower()] or None
+        if not resolved and len(sources_here) == 1:
+            resolved = [sources_here[0]["source"]]
+        if not resolved:
+            available = ", ".join(s["source"] for s in sources_here) or "none"
+            return f"Could not match '{name}' to a specific source. Available sources: {available}"
+        docs = _fetch_broad_context(vectorstore, session_id, resolved)
+        if not docs:
+            return f"No content found for source(s): {', '.join(resolved)}"
+        for d in docs:
+            d.metadata["origin_label"] = label
+        collected_docs.extend(docs)
+        return "\n\n---\n\n".join(
+            f"[Source: {d.metadata.get('source','?')} p.{d.metadata.get('page_number','?')}]\n{d.page_content}"
+            for d in docs
+        )
+    read_source.description = f"(Knowledge base: {label}) {read_source.description}"
+
+    return vector_search, read_source
+
+
 def _react_tools(vectorstore, session_id: str, use_graph: bool, clarify_allowed: bool,
-                  collected_docs: list, clarify_holder: dict) -> list:
+                  collected_docs: list, clarify_holder: dict,
+                  extra_sources: list[dict] | None = None) -> list:
     """Build real, API-registered tools for this request. Closures capture
     per-request state (vectorstore/session) and accumulate retrieved docs
-    for citations, and the clarify answer if the model asks one."""
+    for citations, and the clarify answer if the model asks one.
+
+    extra_sources (optional): attached knowledge bases beyond the personal
+    session, as [{"vectorstore", "session_id", "label"}, ...] - each gets its
+    own uniquely-named vector_search_<kb>/read_source_<kb> tool pair (see
+    _extra_source_tools) so the agent can search a specific one by name."""
 
     @tool
     def vector_search(query: str) -> str:
@@ -1091,7 +1215,7 @@ def _react_tools(vectorstore, session_id: str, use_graph: bool, clarify_allowed:
     def read_source(name: str) -> str:
         """Read a broad slice of ONE specific uploaded file, email, chat, or
         other source, in its original order - use this whenever the user asks
-        what a file/chat/email/inbox "contains" or is "about", asks for a
+        what a file/chat/email/inbox "contains" or is "about", wants a
         summary/overview, or asks for key points/risks/takeaways that may not
         be stated verbatim. Pass the filename (or your best guess at it from
         the user's wording, e.g. "the excel", "this chat", "my inbox") - it
@@ -1121,16 +1245,27 @@ def _react_tools(vectorstore, session_id: str, use_graph: bool, clarify_allowed:
 
     tools = [vector_search, read_source]
 
+    for src in (extra_sources or []):
+        tools.extend(_extra_source_tools(src, collected_docs))
+
     if use_graph:
+        all_session_ids = [session_id] + [s["session_id"] for s in (extra_sources or [])]
+
         @tool
         def graph_search(query: str) -> str:
-            """Search entity relationships in the knowledge graph for the query."""
-            try:
-                from app.services.graph_store import query_graph
-                result = query_graph(query, session_id)
-                return result if result else "No graph relationships found."
-            except Exception as e:
-                return f"Graph search unavailable: {e}"
+            """Search entity relationships in the knowledge graph for the query -
+            covers the personal session and every attached knowledge base."""
+            from app.services.graph_store import query_graph
+            parts = []
+            for sid in all_session_ids:
+                try:
+                    result = query_graph(query, sid)
+                except Exception as e:
+                    logger.warning(f"[REACT] graph_search failed for session={sid} ({e})")
+                    continue
+                if result:
+                    parts.append(result)
+            return "\n\n".join(parts) if parts else "No graph relationships found."
         tools.append(graph_search)
 
     if clarify_allowed:
@@ -1173,19 +1308,31 @@ def _react_answer(
     use_graph: bool,
     history: list[dict],
     clarify_allowed: bool = True,
+    extra_sources: list[dict] | None = None,
 ) -> tuple[str, int, list[dict]]:
     """Real ReAct agent (langchain.agents.create_agent) - native tool calling,
-    not text parsing. Tools: vector_search, graph_search (Advanced), clarify."""
+    not text parsing. Tools: vector_search, graph_search (Advanced), clarify,
+    plus one vector_search_<kb>/read_source_<kb> pair per attached knowledge
+    base in extra_sources (see _react_tools)."""
     t0 = time.time()
     history_block = f"Conversation so far:\n{_history_to_str(history)}\n\n" if history else ""
 
     collected_docs: list = []
     clarify_holder: dict = {}
-    tools = _react_tools(vectorstore, session_id, use_graph, clarify_allowed, collected_docs, clarify_holder)
+    tools = _react_tools(vectorstore, session_id, use_graph, clarify_allowed, collected_docs, clarify_holder,
+                          extra_sources=extra_sources)
 
-    sources = list_session_sources(vectorstore)
+    sources = [{"source": s["source"], "from": None} for s in list_session_sources(vectorstore)]
+    for src in (extra_sources or []):
+        sources.extend(
+            {"source": s["source"], "from": src.get("label")}
+            for s in list_session_sources(src["vectorstore"])
+        )
     sources_block = (
-        "Sources available in this session:\n" + "\n".join(f"- {s['source']}" for s in sources) + "\n\n"
+        "Sources available in this session:\n" + "\n".join(
+            f"- {s['source']}" + (f" (knowledge base: {s['from']})" if s["from"] else "")
+            for s in sources
+        ) + "\n\n"
         if sources else ""
     )
 
@@ -1350,9 +1497,23 @@ def answer_question(
     session_id: str = "default",
     advanced: bool = False,
     thinking: bool = False,
+    extra_sources: list[dict] | None = None,
 ) -> tuple[str, int, list[dict]]:
+    """extra_sources (optional): attached knowledge bases beyond the
+    caller's own vectorstore/session_id, as
+    [{"vectorstore": ..., "session_id": ..., "label": kb_name}, ...] -
+    resolved and permission-checked by the caller (app.routers.chat). The
+    personal session is always included as the first source; conversation
+    history/caching/clarification state stay keyed on its session_id alone,
+    since the conversation itself belongs to that chat session regardless of
+    what's attached to it."""
     t0 = time.time()
-    logger.info(f"[CHAT] question='{question[:100]}', session={session_id}, advanced={advanced}, thinking={thinking}")
+    sources = [{"vectorstore": vectorstore, "session_id": session_id, "label": None}] + list(extra_sources or [])
+    extra_session_ids = tuple(s["session_id"] for s in sources[1:])
+    logger.info(
+        f"[CHAT] question='{question[:100]}', session={session_id}, "
+        f"extra_sources={len(extra_session_ids)}, advanced={advanced}, thinking={thinking}"
+    )
 
     # ── Guard: block injection / reveal attempts before touching the LLM ──────
     blocked, safe_response = guard_query(question)
@@ -1361,7 +1522,7 @@ def answer_question(
 
 
     # ── Cache check ────────────────────────────────────────────────
-    cache_key = _cache_key(session_id, question, advanced, thinking)
+    cache_key = _cache_key(session_id, question, advanced, thinking, extra_session_ids)
     cached = _cache_get(cache_key)
     if cached is not None:
         logger.info(f"[CACHE] Hit - returning cached answer in <1ms")
@@ -1383,7 +1544,7 @@ def answer_question(
         # ── Code-level gates: decide if Clarify action is allowed ─────
         # Gate 1: only allow clarify if 2+ distinct sources exist
         try:
-            sample_docs = _hybrid_retrieve(vectorstore, session_id, [question])
+            sample_docs = _merge_source_docs(sources, question, [question])
             distinct_sources = {d.metadata.get("source", "") for d in sample_docs if d.metadata.get("source")}
             multi_source = len(distinct_sources) >= 2
         except Exception:
@@ -1400,7 +1561,7 @@ def answer_question(
         logger.info(f"[CHAT] Running ReAct agent (thinking=True, use_graph={advanced}, clarify_allowed={clarify_allowed})")
         answer, elapsed_ms, citations = _react_answer(
             vectorstore, question, session_id, use_graph=advanced, history=history,
-            clarify_allowed=clarify_allowed,
+            clarify_allowed=clarify_allowed, extra_sources=extra_sources,
         )
         _history_append(session_id, "user", question)
         _history_append(session_id, "assistant", answer)
@@ -1427,8 +1588,7 @@ def answer_question(
         logger.info("[CHAT] Running simple pipeline (HyDE + BM25 + MMR + Rerank)")
         initial_state: RAGState = {
             "question":      question,
-            "session_id":    session_id,
-            "vectorstore":   vectorstore,
+            "sources":       sources,
             "queries":       hyde_queries,
             "vector_docs":   [],
             "graph_context": "",
@@ -1456,8 +1616,7 @@ def answer_question(
         logger.info("[CHAT] Running advanced pipeline (QueryRewrite + BM25 + MMR + Neo4j + Rerank)")
         initial_state: RAGState = {
             "question":      question,
-            "session_id":    session_id,
-            "vectorstore":   vectorstore,
+            "sources":       sources,
             "queries":       [],
             "vector_docs":   [],
             "graph_context": "",

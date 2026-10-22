@@ -21,10 +21,13 @@ from fastapi.responses import StreamingResponse
 from app.db.session import get_session_factory
 from app.models.db import KnowledgeBase, KnowledgeBaseDocument
 from app.models.schemas import (
+    AdminCreateUserRequest,
     KnowledgeBaseCreateRequest,
     KnowledgeBaseUpdateRequest,
+    UserRolesUpdateRequest,
 )
 from app.routers.upload import ALLOWED_EXTENSIONS, _add_texts_batched_parallel, sse, SSE_HEADERS
+from app.services import auth_service, kb_cache, roles_service
 from app.services.ingestion import parse_file
 from app.services.rag import chunk_text_with_offsets, find_page
 from app.services.vector_store import get_vector_store
@@ -55,6 +58,7 @@ def _kb_to_dict(kb: KnowledgeBase, document_count: int = 0, processing_count: in
         "status":           kb.status,
         "document_count":   document_count,
         "processing_count": processing_count,
+        "allowed_roles":    list(kb.allowed_roles) if kb.allowed_roles else [],
         "created_at":       kb.created_at.isoformat() if kb.created_at else None,
         "updated_at":       kb.updated_at.isoformat() if kb.updated_at else None,
     }
@@ -108,10 +112,12 @@ async def create_knowledge_base(request: Request, body: KnowledgeBaseCreateReque
             session_id=str(uuid.uuid4()),
             status="active",
             created_by=admin.get("email"),
+            allowed_roles=roles_service._normalize_roles(body.allowed_roles) or None,
         )
         db.add(kb)
         db.commit()
         db.refresh(kb)
+        kb_cache.invalidate_kb_cache()
         logger.info(f"[ADMIN] Knowledge base created: {kb.name} ({kb.id})")
         return _kb_to_dict(kb, 0)
     finally:
@@ -133,9 +139,14 @@ async def update_knowledge_base(request: Request, kb_id: uuid.UUID, body: Knowle
             kb.description = body.description
         if body.status is not None:
             kb.status = body.status
+        if body.clear_allowed_roles:
+            kb.allowed_roles = None
+        elif body.allowed_roles is not None:
+            kb.allowed_roles = roles_service._normalize_roles(body.allowed_roles) or None
         kb.updated_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(kb)
+        kb_cache.invalidate_kb_cache()
         total, pending = _counts(db, kb.id)
         logger.info(f"[ADMIN] Knowledge base updated: {kb.name} ({kb.id}) status={kb.status}")
         return _kb_to_dict(kb, total, pending)
@@ -156,6 +167,7 @@ async def delete_knowledge_base(request: Request, kb_id: uuid.UUID):
         ).delete()
         db.delete(kb)
         db.commit()
+        kb_cache.invalidate_kb_cache()
         logger.info(f"[ADMIN] Knowledge base deleted: {kb.name} ({kb.id})")
         return {"status": "ok"}
     finally:
@@ -362,3 +374,83 @@ async def upload_knowledge_base_files(
                    "completion_message": "Knowledge base updated"})
 
     return StreamingResponse(stream(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
+# ── Users & roles ──────────────────────────────────────────────────────────────
+# Regular user accounts live entirely in Supabase Auth (no local `users`
+# table), so "list all users" means asking Supabase's admin API, not this
+# app's own DB - role assignments (app.services.roles_service) are the only
+# part of this that's actually stored locally, keyed by email.
+
+@router.get("/users")
+async def list_users(request: Request):
+    """Every Supabase-registered user, merged with whatever role assignment
+    (if any) exists for them locally - so a user who's never been given a
+    role still shows up here with roles: []."""
+    _require_admin(request)
+    try:
+        # to_thread: admin_list_users() is a blocking network call (cached,
+        # but still synchronous on a cache miss) - running it inline here
+        # would stall the whole event loop, and every other in-flight
+        # request on the server, for the duration of that HTTP round-trip.
+        users = await asyncio.to_thread(auth_service.admin_list_users)
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    except Exception as e:
+        logger.error(f"[ADMIN][USERS] Failed to list Supabase users: {e}")
+        raise HTTPException(502, "Failed to reach Supabase to list users.")
+
+    role_map = roles_service.list_user_roles()
+    for u in users:
+        u["roles"] = role_map.get((u["email"] or "").lower(), [])
+    users.sort(key=lambda u: (u["email"] or "").lower())
+    return users
+
+
+@router.post("/users")
+async def create_user(request: Request, body: AdminCreateUserRequest):
+    """Creates a pre-confirmed Supabase account directly (no OTP/self-signup
+    round-trip) and assigns its initial roles in one call - the admin's
+    "add a user" action."""
+    _require_admin(request)
+    email = body.email.strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(400, "A valid email is required")
+    if not body.password or len(body.password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
+
+    try:
+        created = await asyncio.to_thread(auth_service.admin_create_user, email, body.password, body.name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    except Exception as e:
+        logger.error(f"[ADMIN][USERS] Failed to create user {email}: {e}")
+        raise HTTPException(502, "Failed to create the user account.")
+
+    roles = roles_service.set_user_roles(email, body.roles)
+    logger.info(f"[ADMIN][USERS] Created {email} with roles={roles}")
+    return {**created, "roles": roles}
+
+
+@router.put("/users/{email}/roles")
+async def update_user_roles(request: Request, email: str, body: UserRolesUpdateRequest):
+    """Replaces (not merges) a user's role assignment - the admin UI always
+    sends the full intended set, same pattern as PATCH on a knowledge base's
+    allowed_roles."""
+    _require_admin(request)
+    try:
+        roles = roles_service.set_user_roles(email, body.roles)
+    except RuntimeError as e:
+        raise HTTPException(503, str(e))
+    return {"email": email.strip().lower(), "roles": roles}
+
+
+@router.get("/roles")
+async def list_roles(request: Request):
+    """Every role name already in use (by a user or a KB) - populates the
+    admin UI's suggestion list, not a fixed/validated enum; a brand-new role
+    name can still be typed and assigned at any time."""
+    _require_admin(request)
+    return roles_service.list_known_roles()

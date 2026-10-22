@@ -3,7 +3,7 @@ from sqlalchemy import (
     BigInteger, UniqueConstraint, Index
 )
 from sqlalchemy.orm import declarative_base
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, ARRAY
 from pgvector.sqlalchemy import Vector
 from datetime import datetime, timezone
 import uuid
@@ -78,6 +78,10 @@ class KnowledgeBase(Base):
     session_id  = Column(String, nullable=False, unique=True, default=lambda: str(uuid.uuid4()))
     status      = Column(String, nullable=False, default="active")  # active | inactive
     created_by  = Column(String, nullable=True)  # admin email
+    # Which department roles (see UserRole below) may see/query this KB.
+    # NULL or empty = unrestricted, visible to every signed-in user - the
+    # same behavior every existing knowledge base had before roles existed.
+    allowed_roles = Column(ARRAY(String), nullable=True)
     created_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc),
                           onupdate=lambda: datetime.now(timezone.utc))
@@ -99,6 +103,42 @@ class KnowledgeBaseDocument(Base):
     __table_args__ = (
         Index("ix_kb_documents_knowledge_base_id", "knowledge_base_id"),
     )
+
+
+class SessionKnowledgeBase(Base):
+    """Which knowledge bases are currently attached to a chat session - the
+    server-side record of the attach/detach panel's state, so it survives a
+    page refresh (or a different browser/device hitting the same session_id)
+    instead of living only in frontend localStorage. A session's own uploads
+    need no row here - they're already looked up by session_id directly."""
+    __tablename__ = "session_knowledge_bases"
+
+    session_id        = Column(UUID(as_uuid=True), ForeignKey("sessions.id"), primary_key=True)
+    knowledge_base_id = Column(UUID(as_uuid=True), ForeignKey("knowledge_bases.id"), primary_key=True)
+    attached_at       = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index("ix_session_kbs_session_id", "session_id"),
+    )
+
+
+class UserRole(Base):
+    """Department-access roles for one signed-in user (e.g. "hr", "it",
+    "finance", "sales") - used to restrict which knowledge bases they can
+    see/query. There is no local `users` table (accounts live entirely in
+    Supabase Auth), so this is keyed by email, looked up server-side from
+    the verified token's email claim - never trusted from the token/client
+    itself, since this table is the actual source of authorization truth.
+    A user with no row here (or an empty roles list) can still see every
+    unrestricted knowledge base, just none of the role-restricted ones."""
+    __tablename__ = "user_roles"
+
+    id         = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email      = Column(String, nullable=False, unique=True, index=True)
+    roles      = Column(ARRAY(String), nullable=False, default=list)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
+                         onupdate=lambda: datetime.now(timezone.utc))
 
 
 class EmbeddingModelUsage(Base):

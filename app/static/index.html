@@ -10,6 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
@@ -68,28 +69,48 @@
          side-drawer (below) that overlays the chat area, instead of the
          panel content being squeezed inline below the icons. -->
     <aside class="sidebar" id="sidebar">
+      <div class="sidebar-workspace">
+        <div class="sidebar-workspace-logo"><img src="/dabur-logo.svg" alt="Dabur" class="brand-logo-img" /></div>
+        <div class="sidebar-workspace-info">
+          <div class="sidebar-workspace-name">Dabur India Ltd.</div>
+          <div class="sidebar-workspace-sub">ARIA Workspace</div>
+        </div>
+      </div>
+
+      <div class="sidebar-section-label">Workspace</div>
       <nav class="sidebar-nav">
         <button class="sidebar-nav-btn" onclick="goToChatHome()" title="Back to chat">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11.5 12 4l9 7.5"/><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10"/></svg>
+          <span class="sidebar-nav-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11.5 12 4l9 7.5"/><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10"/></svg></span>
           <span>Home</span>
         </button>
         <button class="sidebar-nav-btn" data-panel="upload" onclick="showSidebarPanel('upload')" title="Upload a document">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <span class="sidebar-nav-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></span>
           <span>Upload</span>
         </button>
         <button class="sidebar-nav-btn" data-panel="connectors" onclick="showSidebarPanel('connectors')" title="Connect a data source">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          <span class="sidebar-nav-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
           <span>Connect</span>
+          <span class="sidebar-nav-badge hidden" id="sidebar-connect-badge">0</span>
         </button>
         <button class="sidebar-nav-btn" data-panel="knowledge" onclick="showSidebarPanel('knowledge')" title="Knowledge base">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          <span class="sidebar-nav-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
           <span>Knowledge</span>
+          <span class="sidebar-nav-badge hidden" id="sidebar-knowledge-badge">0</span>
         </button>
+      </nav>
+
+      <div class="sidebar-section-label">Preferences</div>
+      <nav class="sidebar-nav">
         <button class="sidebar-nav-btn" data-panel="settings" onclick="showSidebarPanel('settings')" title="Settings">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span class="sidebar-nav-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
           <span>Settings</span>
         </button>
       </nav>
+
+      <div class="sidebar-footer">
+        <div class="sidebar-footer-text">ARIA &middot; Dabur India Ltd.</div>
+        <div class="sidebar-user-row" id="sidebar-user-row"></div>
+      </div>
     </aside>
 
     <!-- Side drawer - the wide overlay panel that opens to the right of the
@@ -190,6 +211,12 @@
         <div class="sidebar-title">Settings</div>
         <div class="settings-row">
           <div>
+            <div class="settings-row-label">Your access</div>
+            <div class="settings-row-hint" id="user-roles-display">Loading...</div>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div>
             <div class="settings-row-label">Advanced Mode</div>
             <div class="settings-row-hint">Graph-aware retrieval for complex questions</div>
           </div>
@@ -232,13 +259,24 @@
           <div class="aria-welcome-avatar">
             <img src="/dabur-logo.svg" alt="Dabur" class="brand-logo-img" />
           </div>
-          <h2 class="welcome-title">Hi, I'm ARIA ✦</h2>
-          <p class="welcome-greeting">Your AI Research Intelligence Assistant.<br/>Upload your data and I'll answer anything about it.</p>
-          <div class="welcome-steps">
-            <div class="step"><span class="step-num">1</span>Upload a file, URL, or API</div>
-            <div class="step"><span class="step-num">2</span>Or connect Gmail, GitHub &amp; more</div>
-            <div class="step"><span class="step-num">3</span>Click Process &amp; Chat</div>
-            <div class="step"><span class="step-num">4</span>Ask me anything</div>
+          <h2 class="welcome-title" id="welcome-title">Hi, I'm ARIA ✦</h2>
+          <p class="welcome-greeting">Ask ARIA about anything in your connected knowledge bases, policies, product data, or uploaded documents. Responses are grounded in your sources, with citations.</p>
+          <div class="welcome-steps welcome-steps--3">
+            <div class="step">
+              <span class="step-num">1</span>
+              <span class="step-title">Upload a file, URL, or API</span>
+              <span class="step-desc">PDF, DOCX, CSV, or a live source</span>
+            </div>
+            <div class="step">
+              <span class="step-num">2</span>
+              <span class="step-title">Or connect a source</span>
+              <span class="step-desc">Gmail, GitHub, Drive, and more</span>
+            </div>
+            <div class="step">
+              <span class="step-num">3</span>
+              <span class="step-title">Process your data</span>
+              <span class="step-desc">ARIA indexes it for search</span>
+            </div>
           </div>
         </div>
       </div>

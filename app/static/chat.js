@@ -20,7 +20,11 @@ const state = {
   connectorsLoaded: false,
   connectors:   [],
   connectorsUnlockToken: null,
-  selectedKnowledgeBaseId: null,
+  // Knowledge bases attached to this chat session - server-side (see
+  // app.routers.knowledge_base's /sessions/{id}/knowledge-bases endpoints),
+  // not just local state, so attachment survives a page refresh and any
+  // number can be attached at once alongside your own uploads/connectors.
+  attachedKnowledgeBaseIds: new Set(),
   knowledgeBases: [],
   activeSidebarPanel: 'upload',
 };
@@ -33,6 +37,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initClientToken();
   initAdvancedMode();
   initThinkingMode();
+  initSessionId();
   setupTabs();
   setupDragDrop();
   setupFileInput();
@@ -90,7 +95,77 @@ function showSidebarPanel(name) {
     // this tab is already open, and a one-time-only load would keep showing
     // the stale list until the page is hard-refreshed.
     loadKnowledgeBases();
+  } else if (name === 'settings') {
+    // Always refetch - an admin can change this user's roles at any time,
+    // and the next time they open Settings should reflect that without
+    // needing to sign out and back in.
+    loadUserRoles();
   }
+}
+
+async function loadUserRoles() {
+  const el = document.getElementById('user-roles-display');
+  if (!el) return;
+  try {
+    const res = await fetch('/auth/me', { headers: authHeaders() });
+    if (!res.ok) {
+      // Swallowing the real failure (status + body) made this undiagnosable
+      // from the UI alone - logging it means the browser console shows
+      // exactly why, instead of just the generic message below. Read the
+      // body off a clone: handleAuthError below needs its own untouched
+      // read of the same response, and a Response body can only be
+      // consumed once.
+      const body = await res.clone().text().catch(() => '');
+      console.error(`[loadUserRoles] GET /auth/me failed: ${res.status} ${body}`);
+      // A real expired/invalid session (not a transient error) should send
+      // the user back to sign in, same as every other authenticated call in
+      // this app already does via handleAuthError - leaving static text
+      // here instead left no way forward for the rare case the Supabase
+      // refresh above couldn't restore the session (e.g. idle long enough
+      // for the refresh token itself to expire).
+      if (await handleAuthError(res)) return;
+      el.textContent = res.status === 401
+        ? 'Your session expired - please sign in again.'
+        : `Could not load your access (error ${res.status}).`;
+      return;
+    }
+    const data = await res.json();
+    const roles = data.roles || [];
+    el.textContent = roles.length
+      ? `Roles: ${roles.join(', ')} - you can see knowledge bases open to everyone, plus these.`
+      : 'No roles assigned - you can see knowledge bases open to everyone.';
+  } catch (e) {
+    console.error('[loadUserRoles] network error calling /auth/me:', e);
+    el.textContent = 'Could not load your access - check your connection.';
+  }
+}
+
+/* ── Combined doc list: your own uploads/connectors + every attached KB ──
+   All three sources are queryable together in one chat (see sendMessage),
+   so both attached-docs popovers show all of them, each tagged with where
+   it came from, not just whichever single source used to be selected. */
+async function fetchAllAttachedDocs() {
+  const out = [];
+  if (state.sessionId) {
+    try {
+      const res = await fetch(`/upload/session-documents?session_id=${encodeURIComponent(state.sessionId)}`, { headers: authHeaders() });
+      if (res.ok) {
+        const docs = await res.json();
+        docs.forEach(d => out.push({ filename: d.filename, from: null, removable: true }));
+      }
+    } catch (e) { /* ignore - other sources may still load */ }
+  }
+  for (const kb of state.knowledgeBases) {
+    if (!state.attachedKnowledgeBaseIds.has(kb.id)) continue;
+    try {
+      const res = await fetch(`/knowledge-bases/${kb.id}/files`, { headers: authHeaders() });
+      if (res.ok) {
+        const docs = await res.json();
+        docs.forEach(d => out.push({ filename: d.filename, from: kb.name, removable: false }));
+      }
+    } catch (e) { /* ignore - other sources may still load */ }
+  }
+  return out;
 }
 
 /* ── "Which documents are attached" popover (session badge) ─────── */
@@ -105,16 +180,9 @@ async function toggleAttachedDocsPopover(evt) {
   list.innerHTML = '<div class="attached-docs-empty">Loading…</div>';
 
   try {
-    let docs = [];
-    if (state.selectedKnowledgeBaseId) {
-      const res = await fetch(`/knowledge-bases/${state.selectedKnowledgeBaseId}/files`, { headers: authHeaders() });
-      if (res.ok) docs = await res.json();
-    } else if (state.sessionId) {
-      const res = await fetch(`/upload/session-documents?session_id=${encodeURIComponent(state.sessionId)}`, { headers: authHeaders() });
-      if (res.ok) docs = await res.json();
-    }
+    const docs = await fetchAllAttachedDocs();
     list.innerHTML = docs.length
-      ? docs.map(d => `<div class="attached-docs-row">${escHtml(d.filename)}</div>`).join('')
+      ? docs.map(d => `<div class="attached-docs-row">${escHtml(d.filename)}${d.from ? ` <span class="attached-docs-source">(${escHtml(d.from)})</span>` : ''}</div>`).join('')
       : '<div class="attached-docs-empty">No documents attached yet.</div>';
   } catch (e) {
     list.innerHTML = '<div class="attached-docs-empty">Couldn\'t load the document list.</div>';
@@ -181,41 +249,22 @@ async function loadComposerAttachments() {
   const list = document.getElementById('composer-attachments-list');
   list.innerHTML = '<div class="attached-docs-empty">Loading…</div>';
 
-  // A knowledge base (admin-curated, shared) was still falling through to
-  // the "no documents attached" empty state here, even though it's exactly
-  // what the chat is actually answering from - this popover only ever
-  // checked state.sessionId, never state.selectedKnowledgeBaseId (unlike
-  // the other attached-docs popover, toggleAttachedDocsPopover, which
-  // already handled both cases).
-  if (state.selectedKnowledgeBaseId) {
-    try {
-      const res = await fetch(`/knowledge-bases/${state.selectedKnowledgeBaseId}/files`, { headers: authHeaders() });
-      const docs = res.ok ? await res.json() : [];
-      // Shared KB documents aren't removable by the user here - no "x" button.
-      list.innerHTML = docs.length
-        ? docs.map(d => `<div class="attached-docs-row">${escHtml(d.filename)}</div>`).join('')
-        : '<div class="attached-docs-empty">No documents in this knowledge base yet.</div>';
-    } catch (e) {
-      list.innerHTML = '<div class="attached-docs-empty">Couldn\'t load the document list.</div>';
-    }
-    return;
-  }
-
-  if (!state.sessionId) {
-    list.innerHTML = '<div class="attached-docs-empty">No documents attached yet.</div>';
-    return;
-  }
   try {
-    const res = await fetch(`/upload/session-documents?session_id=${encodeURIComponent(state.sessionId)}`, { headers: authHeaders() });
-    const docs = res.ok ? await res.json() : [];
+    const docs = await fetchAllAttachedDocs();
+    // Your own uploads are removable ("x" button); shared knowledge-base
+    // documents aren't - same rule as before, now per-row instead of
+    // per-popover, since both kinds can be in this list together.
     list.innerHTML = docs.length
-      ? docs.map(d => `
+      ? docs.map(d => d.removable ? `
           <div class="attached-docs-row attached-docs-row--removable">
             <span class="attached-docs-name">${escHtml(d.filename)}</span>
             <button class="attached-docs-remove" onclick="detachSessionDocument('${escAttr(d.filename)}')"
                     title="Remove from this chat" aria-label="Remove ${escAttr(d.filename)}">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             </button>
+          </div>` : `
+          <div class="attached-docs-row">
+            <span class="attached-docs-name">${escHtml(d.filename)} <span class="attached-docs-source">(${escHtml(d.from)})</span></span>
           </div>`).join('')
       : '<div class="attached-docs-empty">No documents attached yet.</div>';
   } catch (e) {
@@ -266,7 +315,12 @@ function goToChatHome() {
   scrollToBottom();
 }
 
-/* ── Knowledge bases (admin-curated, shared document sets) ──────── */
+/* ── Knowledge bases (admin-curated, shared document sets) ───────────────
+   Any number can be attached at once, alongside your own uploads/connectors
+   - all queryable together in the same chat (see sendMessage). Attachment
+   is persisted server-side (app.routers.knowledge_base's
+   /sessions/{id}/knowledge-bases endpoints), not just in local state, so it
+   survives a page refresh and a direct-in-chat upload never clears it. */
 async function loadKnowledgeBases() {
   try {
     const res = await fetch('/knowledge-bases', { headers: authHeaders() });
@@ -281,52 +335,82 @@ async function loadKnowledgeBases() {
 }
 
 function renderKbList() {
+  const badge = document.getElementById('sidebar-knowledge-badge');
+  if (badge) {
+    badge.textContent = state.knowledgeBases.length;
+    badge.classList.toggle('hidden', state.knowledgeBases.length === 0);
+  }
   const list = document.getElementById('kb-list');
   if (!list) return;
-  const rows = [
-    { id: '', name: 'My uploaded documents', description: 'Files, URLs, and connectors you add yourself' },
-    ...state.knowledgeBases,
-  ];
-  list.innerHTML = rows.map(kb => {
-    const isActive = (state.selectedKnowledgeBaseId || '') === kb.id;
-    const safeName = escHtml(kb.name).replace(/'/g, "&#39;");
-    // Every row (including "My uploaded documents") gets an explicit
-    // Attach/Detach button - no relying on clicking the row itself, since
-    // that wasn't discoverable as an action.
-    const actionBtn = isActive
-      ? (kb.id ? `<button class="kb-row-action detach" onclick="event.stopPropagation(); detachKnowledgeBase();">Detach</button>`
-                : `<span class="kb-list-row-attached">Active</span>`)
-      : `<button class="kb-row-action attach" onclick="event.stopPropagation(); selectKnowledgeBase('${kb.id}', '${safeName}');">Attach</button>`;
-    return `
-    <div class="kb-list-row ${isActive ? 'active' : ''}">
+  list.innerHTML = [
+    // "My uploaded documents" is always included - it's not a knowledge
+    // base you attach/detach, just a fixed reminder of what's always in play.
+    `<div class="kb-list-row active">
       <div class="kb-list-row-top">
-        <div class="kb-list-row-name">${escHtml(kb.name)}</div>
-        ${actionBtn}
+        <div class="kb-list-row-name">My uploaded documents</div>
+        <span class="kb-list-row-attached">Active</span>
       </div>
-      ${kb.description ? `<div class="kb-list-row-desc">${escHtml(kb.description)}</div>` : ''}
-    </div>`;
-  }).join('');
+      <div class="kb-list-row-desc">Files, URLs, and connectors you add yourself</div>
+    </div>`,
+    ...state.knowledgeBases.map(kb => {
+      const isActive = state.attachedKnowledgeBaseIds.has(kb.id);
+      const safeName = escHtml(kb.name).replace(/'/g, "&#39;");
+      const actionBtn = isActive
+        ? `<button class="kb-row-action detach" onclick="event.stopPropagation(); toggleKnowledgeBase('${kb.id}', '${safeName}', true);">Detach</button>`
+        : `<button class="kb-row-action attach" onclick="event.stopPropagation(); toggleKnowledgeBase('${kb.id}', '${safeName}', false);">Attach</button>`;
+      return `
+      <div class="kb-list-row ${isActive ? 'active' : ''}">
+        <div class="kb-list-row-top">
+          <div class="kb-list-row-name">${escHtml(kb.name)}</div>
+          ${actionBtn}
+        </div>
+        ${kb.description ? `<div class="kb-list-row-desc">${escHtml(kb.description)}</div>` : ''}
+      </div>`;
+    }),
+  ].join('');
 }
 
-function selectKnowledgeBase(id, name) {
-  state.selectedKnowledgeBaseId = id || null;
+function updateSessionBadgeLabel() {
+  const n = state.attachedKnowledgeBaseIds.size;
+  document.getElementById('session-badge').classList.remove('hidden');
+  document.getElementById('session-label').textContent =
+    n === 0 ? 'Session Active' : n === 1 ? '1 knowledge base attached' : `${n} knowledge bases attached`;
+  const detachBtn = document.getElementById('kb-detach-btn');
+  detachBtn.classList.toggle('hidden', n === 0);
+  detachBtn.title = n > 1 ? 'Detach all knowledge bases' : 'Stop using this knowledge base';
+}
+
+async function toggleKnowledgeBase(id, name, currentlyAttached) {
+  if (!state.sessionId) return;
+  try {
+    const res = await fetch(
+      `/sessions/${encodeURIComponent(state.sessionId)}/knowledge-bases/${encodeURIComponent(id)}`,
+      { method: currentlyAttached ? 'DELETE' : 'POST', headers: authHeaders() },
+    );
+    if (!res.ok) {
+      toast(currentlyAttached ? 'Could not detach knowledge base' : 'Could not attach knowledge base', 'error');
+      return;
+    }
+  } catch (e) {
+    toast('Network error - please try again', 'error');
+    return;
+  }
+
+  if (currentlyAttached) state.attachedKnowledgeBaseIds.delete(id);
+  else state.attachedKnowledgeBaseIds.add(id);
   renderKbList();
-
-  const badge      = document.getElementById('session-badge');
-  const detachBtn  = document.getElementById('kb-detach-btn');
-  badge.classList.remove('hidden');
-  document.getElementById('session-label').textContent = id ? name : 'Session Active';
-  detachBtn.classList.toggle('hidden', !id);
-  toast(id ? `Now chatting with "${name}"` : 'Switched to your uploaded documents', 'success');
+  updateSessionBadgeLabel();
+  toast(currentlyAttached ? `Detached "${name}"` : `Attached "${name}"`, currentlyAttached ? 'info' : 'success');
 }
 
-// Explicitly disconnects the active knowledge base - chat falls back to the
-// user's own uploaded documents, same effect as selecting that row, just
-// reachable with one click from the header instead of opening the panel.
-function detachKnowledgeBase() {
-  if (!state.selectedKnowledgeBaseId) return;
-  selectKnowledgeBase('', 'My uploaded documents');
-  toast('Knowledge base detached', 'info');
+// One-click "detach everything" from the header badge - individual KBs are
+// still detached one at a time from the sidebar panel's own Detach buttons.
+async function detachKnowledgeBase() {
+  const ids = Array.from(state.attachedKnowledgeBaseIds);
+  for (const id of ids) {
+    const kb = state.knowledgeBases.find(k => k.id === id);
+    await toggleKnowledgeBase(id, kb ? kb.name : id, true);
+  }
 }
 
 // The OAuth callback (gmail/google-drive) redirects back here
@@ -379,7 +463,13 @@ function initAuth() {
 
   if (!state.authToken) { window.location.replace('/auth.html'); return; }
 
+  initSupabaseRefresh();
+
   const user = state.authUser;
+
+  const titleEl = document.getElementById('welcome-title');
+  if (titleEl) titleEl.textContent = greetingText();
+
   if (!user) return;
 
   // Inject user chip into header
@@ -405,6 +495,61 @@ function initAuth() {
         </svg>
       </button>`;
     headerRight.appendChild(chip);
+  }
+
+  // Same identity, mirrored into the sidebar's own profile row - the
+  // header chip can scroll out of view on narrow layouts, and the sidebar
+  // is the more natural place to reach sign-out from while browsing panels.
+  const sidebarUserRow = document.getElementById('sidebar-user-row');
+  if (sidebarUserRow) {
+    const isGuest = user.role === 'guest';
+    const initials = (user.name || user.email || 'U')
+      .split(' ').map(p => p[0]).join('').toUpperCase().slice(0, 2);
+    sidebarUserRow.innerHTML = `
+      <div class="user-avatar-sm">${initials}</div>
+      <div class="sidebar-user-row-info">
+        <div class="sidebar-user-row-name">${escHtml(user.name || user.email)}</div>
+        <div class="sidebar-user-row-status">${isGuest ? 'Guest' : 'Online'}</div>
+      </div>
+      <button class="sidebar-user-row-more" onclick="logout()" title="Sign out">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+      </button>`;
+  }
+
+  // Populate the Knowledge sidebar badge immediately rather than waiting
+  // for the user to open that panel at least once.
+  loadKnowledgeBases();
+}
+
+// A Supabase-issued access token (what signInWithPassword/OTP/OAuth all
+// hand back) expires after about an hour. auth.js captures it ONCE into
+// rag_auth_token at sign-in and this page never refreshed it, so a user who
+// just kept their tab open for over an hour got silently logged out of
+// every API call (including /auth/me, which is what made "Your access" in
+// Settings show "session expired" for someone who never actually signed
+// out). Supabase's own client already auto-refreshes the token in the
+// background and persists it to localStorage under its own key, as long as
+// a client exists on the page to run that timer - previously only
+// auth.html created one. Creating the same client here (reading the
+// already-persisted session, not a new login) and mirroring every refresh
+// into rag_auth_token keeps the two in sync for the whole time the tab is
+// open. Guest and admin-JWT logins never had a Supabase session to begin
+// with, so getSession() simply resolves to null for them and this is a
+// no-op - only real Supabase-authenticated users are affected.
+async function initSupabaseRefresh() {
+  try {
+    const res = await fetch('/auth/oauth-config');
+    const cfg = await res.json();
+    if (!cfg.supabase_url || !cfg.supabase_anon_key) return;
+    const sb = supabase.createClient(cfg.supabase_url, cfg.supabase_anon_key);
+    sb.auth.onAuthStateChange((_event, session) => {
+      if (session && session.access_token) {
+        state.authToken = session.access_token;
+        localStorage.setItem('rag_auth_token', session.access_token);
+      }
+    });
+  } catch (e) {
+    console.warn('[initSupabaseRefresh] could not set up token refresh:', e.message);
   }
 }
 
@@ -510,34 +655,62 @@ function initClientToken() {
 // though they're still sitting untouched in the database. Called once on
 // load, after initClientToken() (needs state.clientToken implicitly via
 // authHeaders) and initAuth() (needs state.authToken).
+// Ensures state.sessionId always has a value, even before the user has
+// uploaded anything - needed so a knowledge base can be attached right
+// away (toggleKnowledgeBase) without waiting on a first upload to mint a
+// session id. The backend lazily creates the matching `sessions` row on
+// first attach/upload either way (see session_attachments._ensure_session_row).
+function initSessionId() {
+  let saved = localStorage.getItem('rag_session_id');
+  if (!saved) {
+    saved = _uuid();
+    localStorage.setItem('rag_session_id', saved);
+  }
+  state.sessionId = saved;
+}
+
 async function restoreSession() {
-  const saved = localStorage.getItem('rag_session_id');
-  if (!saved) return;
+  if (!state.sessionId) return;
   try {
-    const res = await fetch(`/upload/session-documents?session_id=${encodeURIComponent(saved)}`, { headers: authHeaders() });
-    if (!res.ok) { localStorage.removeItem('rag_session_id'); return; }
-    const docs = await safeJson(res);
-    if (!Array.isArray(docs) || docs.length === 0) {
-      // Nothing (or no longer anything) under this id - don't force the UI
-      // into a "ready" state with nothing actually attached.
-      localStorage.removeItem('rag_session_id');
-      return;
+    const res = await fetch(`/upload/session-documents?session_id=${encodeURIComponent(state.sessionId)}`, { headers: authHeaders() });
+    const docs = res.ok ? await safeJson(res) : [];
+    if (Array.isArray(docs) && docs.length > 0) {
+      state.isReady = true;
+      document.getElementById('session-badge').classList.remove('hidden');
+      document.getElementById('session-label').textContent = 'Session Active';
+      document.getElementById('reset-btn').classList.remove('hidden');
+
+      const input = document.getElementById('chat-input');
+      const sendBtn = document.getElementById('send-btn');
+      input.disabled = false;
+      input.placeholder = 'Ask anything about your data...';
+      sendBtn.disabled = false;
     }
-
-    state.sessionId = saved;
-    state.isReady = true;
-    document.getElementById('session-badge').classList.remove('hidden');
-    document.getElementById('session-label').textContent = 'Session Active';
-    document.getElementById('reset-btn').classList.remove('hidden');
-
-    const input = document.getElementById('chat-input');
-    const sendBtn = document.getElementById('send-btn');
-    input.disabled = false;
-    input.placeholder = 'Ask anything about your data...';
-    sendBtn.disabled = false;
   } catch (_) {
-    // Network hiccup while restoring - leave the session unattached rather
-    // than risk marking the UI "ready" with nothing actually confirmed.
+    // Network hiccup restoring personal documents - leave that part of the
+    // UI alone; attached knowledge bases are restored independently below.
+  }
+  // Independent of the above: a session can have knowledge bases attached
+  // with zero personal uploads (or vice versa), so neither check should
+  // discard the other's state.
+  await restoreAttachedKnowledgeBases();
+}
+
+// Pulls this session's currently-attached knowledge bases from the server
+// (GET /sessions/{id}/knowledge-bases) - the actual fix for attachment
+// silently disappearing on refresh: it now lives server-side, not in
+// localStorage, and survives both a refresh and any direct-in-chat upload.
+async function restoreAttachedKnowledgeBases() {
+  try {
+    const res = await fetch(`/sessions/${encodeURIComponent(state.sessionId)}/knowledge-bases`, { headers: authHeaders() });
+    if (!res.ok) return;
+    const kbs = await safeJson(res);
+    if (!Array.isArray(kbs) || kbs.length === 0) return;
+    state.attachedKnowledgeBaseIds = new Set(kbs.map(kb => kb.id));
+    updateSessionBadgeLabel();
+    renderKbList();
+  } catch (_) {
+    // Network hiccup - leave attachment state as whatever it already was.
   }
 }
 
@@ -1128,15 +1301,14 @@ function onProcessed(sessionId) {
   // connector's OAuth "Connect" does) can resume this session instead of
   // orphaning it - see restoreSession().
   localStorage.setItem('rag_session_id', sessionId);
-  // A fresh upload/connector ingest always means "chat with what I just
-  // added" - clear any previously selected knowledge base so the new
-  // session_id actually takes effect instead of being shadowed by a stale
-  // knowledge_base_id still being sent on every /chat/ call.
-  state.selectedKnowledgeBaseId = null;
+  // Attached knowledge bases are intentionally left untouched here - a
+  // fresh upload/connector ingest adds to this session's own documents,
+  // it doesn't replace what's attached. Both are queryable together (see
+  // sendMessage) and only an explicit Detach removes a knowledge base.
   renderKbList();
 
   document.getElementById('session-badge').classList.remove('hidden');
-  document.getElementById('session-label').textContent = 'Session Active';
+  updateSessionBadgeLabel();
   document.getElementById('reset-btn').classList.remove('hidden');
 
   const input  = document.getElementById('chat-input');
@@ -1198,6 +1370,12 @@ async function loadConnectors() {
 function renderConnectors() {
   document.getElementById('connector-list').innerHTML =
     state.connectors.map(connectorRowHtml).join('');
+  const connectedCount = state.connectors.filter(c => c.connected).length;
+  const badge = document.getElementById('sidebar-connect-badge');
+  if (badge) {
+    badge.textContent = connectedCount;
+    badge.classList.toggle('hidden', connectedCount === 0);
+  }
 }
 
 function connectorRowHtml(c) {
@@ -2461,7 +2639,9 @@ async function sendMessage() {
       body: JSON.stringify({
         session_id: state.sessionId,
         question,
-        knowledge_base_id: state.selectedKnowledgeBaseId || undefined,
+        // Which knowledge bases (if any) to also search is no longer sent
+        // per-message - the backend looks up this session's attached set
+        // itself (app.services.session_attachments), server-side.
       }),
     });
     if (await handleAuthError(res)) return;
@@ -2581,11 +2761,13 @@ function copyText(btn, text) {
 
 /* ── Reset ───────────────────────────────────────────────────── */
 function resetSession() {
-  state.sessionId  = null;
   state.isReady    = false;
   state.files      = [];
-  state.selectedKnowledgeBaseId = null;
-  localStorage.removeItem('rag_session_id');
+  state.attachedKnowledgeBaseIds = new Set();
+  // A fresh session id, not just null - toggleKnowledgeBase() needs one to
+  // attach a knowledge base to right away, before any upload mints one.
+  state.sessionId = _uuid();
+  localStorage.setItem('rag_session_id', state.sessionId);
   renderFileList();
   renderKbList();
 
@@ -2604,15 +2786,40 @@ function resetSession() {
       <div class="aria-welcome-avatar">
         <img src="/dabur-logo.svg" alt="Dabur" class="brand-logo-img" />
       </div>
-      <h2 class="welcome-title">Hi, I'm ARIA ✦</h2>
-      <p class="welcome-greeting">Upload your data and I'll answer anything about it.</p>
-      <div class="welcome-steps">
-        <div class="step"><span class="step-num">1</span>Upload a file, URL, or API</div>
-        <div class="step"><span class="step-num">2</span>Or connect Gmail, GitHub &amp; more</div>
-        <div class="step"><span class="step-num">3</span>Click Process &amp; Chat</div>
-        <div class="step"><span class="step-num">4</span>Ask me anything</div>
+      <h2 class="welcome-title" id="welcome-title">${escHtml(greetingText())}</h2>
+      <p class="welcome-greeting">Ask ARIA about anything in your connected knowledge bases, policies, product data, or uploaded documents. Responses are grounded in your sources, with citations.</p>
+      <div class="welcome-steps welcome-steps--3">
+        <div class="step">
+          <span class="step-num">1</span>
+          <span class="step-title">Upload a file, URL, or API</span>
+          <span class="step-desc">PDF, DOCX, CSV, or a live source</span>
+        </div>
+        <div class="step">
+          <span class="step-num">2</span>
+          <span class="step-title">Or connect a source</span>
+          <span class="step-desc">Gmail, GitHub, Drive, and more</span>
+        </div>
+        <div class="step">
+          <span class="step-num">3</span>
+          <span class="step-title">Process your data</span>
+          <span class="step-desc">ARIA indexes it for search</span>
+        </div>
       </div>
     </div>`;
+}
+
+// 4:00-11:59 "morning", 12:00-17:59 "afternoon", 18:00-3:59 "evening" - the
+// exact boundaries the user specified, not a generic 12/17 split that would
+// miss the 4am starting point or treat midnight-4am as morning.
+function greetingText() {
+  const hour = new Date().getHours();
+  const period = (hour >= 4 && hour < 12) ? 'morning'
+    : (hour >= 12 && hour < 18) ? 'afternoon'
+    : 'evening';
+  const user = state.authUser;
+  const rawName = user && (user.name || user.email) ? (user.name || user.email) : '';
+  const firstName = rawName.split(' ')[0].split('@')[0];
+  return firstName ? `Good ${period}, ${firstName}` : `Good ${period}`;
 }
 
 /* ── Processing state ────────────────────────────────────────── */

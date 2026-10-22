@@ -28,7 +28,6 @@ class IngestResponse(BaseModel):
 class ChatRequest(BaseModel):
     session_id: UUID
     question: str
-    knowledge_base_id: Optional[UUID] = None
 
 
 class ChatResponse(BaseModel):
@@ -51,12 +50,20 @@ class ConfirmResponse(BaseModel):
 class KnowledgeBaseCreateRequest(BaseModel):
     name: str
     description: Optional[str] = None
+    # None/[] = unrestricted (every signed-in user can see it) - omitting
+    # this field entirely keeps a knowledge base's historical default.
+    allowed_roles: Optional[list[str]] = None
 
 
 class KnowledgeBaseUpdateRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     status: Optional[Literal["active", "inactive"]] = None
+    # Distinguishing "not sent" (don't touch) from "sent as []" (clear the
+    # restriction, make it unrestricted again) needs a sentinel, not plain
+    # None - see admin.py's update_knowledge_base for how this is read.
+    allowed_roles: Optional[list[str]] = None
+    clear_allowed_roles: bool = False
 
 
 class KnowledgeBaseOut(BaseModel):
@@ -65,6 +72,7 @@ class KnowledgeBaseOut(BaseModel):
     description: Optional[str] = None
     status: str
     document_count: int = 0
+    allowed_roles: Optional[list[str]] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -73,6 +81,17 @@ class KnowledgeBasePublicOut(BaseModel):
     id: UUID
     name: str
     description: Optional[str] = None
+
+
+class UserRolesUpdateRequest(BaseModel):
+    roles: list[str]
+
+
+class AdminCreateUserRequest(BaseModel):
+    email: str
+    password: str
+    name: Optional[str] = None
+    roles: list[str] = []
 
 
 class KnowledgeBaseDocumentOut(BaseModel):
