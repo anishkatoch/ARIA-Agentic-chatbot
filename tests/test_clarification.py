@@ -376,3 +376,63 @@ class TestClarifyInPrompt:
         desc = clarify_tool.description.lower()
         assert "sparingly" in desc or "only when" in desc or "ambiguous" in desc, \
             "clarify tool description must tell the model to use it sparingly"
+
+
+# ── Thinking Mode with multiple attached knowledge bases ─────────────────────
+# _react_tools' extra_sources param (added alongside multi-source chat
+# support) must stay fully backward compatible - every call above with no
+# extra_sources keeps working unchanged - while giving the ReAct agent a
+# distinctly-named tool pair per attached knowledge base so it can target
+# a specific one by name instead of only ever searching the personal session.
+
+class TestReactToolsMultiSource:
+    def test_no_extra_sources_keeps_original_tool_names(self):
+        from app.services.rag import _react_tools
+        tools = _react_tools(MagicMock(), "s1", use_graph=False, clarify_allowed=False,
+                              collected_docs=[], clarify_holder={})
+        assert sorted(t.name for t in tools) == ["read_source", "vector_search"]
+
+    def test_one_extra_source_adds_uniquely_named_tool_pair(self):
+        from app.services.rag import _react_tools
+        extra = [{"vectorstore": MagicMock(), "session_id": "kb-1", "label": "HR Policies"}]
+        tools = _react_tools(MagicMock(), "s1", use_graph=False, clarify_allowed=False,
+                              collected_docs=[], clarify_holder={}, extra_sources=extra)
+        names = sorted(t.name for t in tools)
+        assert names == ["read_source", "read_source_hr_policies", "vector_search", "vector_search_hr_policies"]
+
+    def test_extra_source_tool_description_names_its_knowledge_base(self):
+        from app.services.rag import _react_tools
+        extra = [{"vectorstore": MagicMock(), "session_id": "kb-1", "label": "HR Policies"}]
+        tools = _react_tools(MagicMock(), "s1", use_graph=False, clarify_allowed=False,
+                              collected_docs=[], clarify_holder={}, extra_sources=extra)
+        kb_tool = next(t for t in tools if t.name == "vector_search_hr_policies")
+        assert "HR Policies" in kb_tool.description
+
+    def test_extra_source_tool_tags_results_with_origin_label(self):
+        from app.services.rag import _react_tools
+        from langchain_core.documents import Document
+
+        kb_vectorstore = MagicMock()
+        extra = [{"vectorstore": kb_vectorstore, "session_id": "kb-1", "label": "HR Policies"}]
+        collected_docs = []
+        with patch("app.services.rag._hybrid_retrieve",
+                   return_value=[Document(page_content="policy text", metadata={"source": "handbook.pdf"})]):
+            tools = _react_tools(MagicMock(), "s1", use_graph=False, clarify_allowed=False,
+                                  collected_docs=collected_docs, clarify_holder={}, extra_sources=extra)
+            kb_tool = next(t for t in tools if t.name == "vector_search_hr_policies")
+            kb_tool.invoke({"query": "vacation policy"})
+        assert len(collected_docs) == 1
+        assert collected_docs[0].metadata["origin_label"] == "HR Policies"
+
+    def test_graph_search_queries_every_attached_session(self):
+        from app.services.rag import _react_tools
+        extra = [{"vectorstore": MagicMock(), "session_id": "kb-1", "label": "HR Policies"}]
+        tools = _react_tools(MagicMock(), "personal-session", use_graph=True, clarify_allowed=False,
+                              collected_docs=[], clarify_holder={}, extra_sources=extra)
+        graph_tool = next(t for t in tools if t.name == "graph_search")
+        with patch("app.services.graph_store.query_graph",
+                   side_effect=lambda q, sid: f"result-for-{sid}") as mock_query:
+            result = graph_tool.invoke({"query": "who owns X"})
+        queried_sessions = {c.args[1] for c in mock_query.call_args_list}
+        assert queried_sessions == {"personal-session", "kb-1"}
+        assert "result-for-personal-session" in result and "result-for-kb-1" in result

@@ -30,40 +30,77 @@
   min-height: 100vh;
   background: var(--bg);
   color: var(--text);
-}
-
-.admin-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px 28px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
+  align-items: stretch;
 }
 
-.admin-header-left { display: flex; align-items: center; gap: 10px; }
-.admin-logo-img { width: 28px; height: 28px; object-fit: contain; }
-.admin-title { font-size: 17px; font-weight: 700; }
+/* ── Left sidebar (Knowledge Bases / Users nav) ─────────────────── */
+.admin-sidebar {
+  width: 272px; flex: none;
+  display: flex; flex-direction: column;
+  padding: 26px 18px;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  min-height: 100vh;
+}
+.admin-sidebar-brand { display: flex; align-items: center; gap: 12px; padding: 4px 8px 28px; }
+.admin-logo-img { width: 34px; height: 34px; object-fit: contain; }
+.admin-title { font-size: 21px; font-weight: 800; letter-spacing: -0.01em; }
 
-.admin-header-right { display: flex; align-items: center; gap: 10px; }
+.admin-nav { display: flex; flex-direction: column; gap: 4px; }
+.admin-nav-btn {
+  position: relative;
+  display: flex; align-items: center; gap: 12px;
+  background: none; border: none; cursor: pointer; text-align: left;
+  padding: 12px 14px 12px 18px; border-radius: var(--radius-sm, 10px);
+  font-size: 15.5px; font-weight: 600; color: var(--text-muted, #64748b);
+  transition: color .15s, background .15s;
+}
+.admin-nav-btn:hover { color: var(--text); background: var(--surface-2, var(--bg)); }
+.admin-nav-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.admin-nav-btn.active { color: var(--accent); background: rgba(0,122,61,.1); font-weight: 700; }
+/* A left accent bar (rather than relying on the tint alone) reads clearly
+   as "current section" at a glance, the way most SaaS side-nav patterns
+   signal selection. */
+.admin-nav-btn.active::before {
+  content: ""; position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+  width: 3px; height: 16px; border-radius: 3px; background: var(--accent);
+}
+.admin-nav-btn svg { flex: none; }
+
+.admin-sidebar-footer {
+  margin-top: auto; padding-top: 16px; border-top: 1px solid var(--border);
+  display: flex; align-items: center; gap: 10px;
+}
 
 .admin-btn {
+  display: inline-flex; align-items: center; gap: 6px;
   padding: 9px 16px;
   border-radius: var(--radius-sm, 10px);
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
-  font-size: 13.5px;
+  font-size: 14px;
   font-weight: 600;
   cursor: pointer;
   transition: opacity .15s;
 }
+.admin-btn svg { flex: none; }
 .admin-btn:hover { opacity: .85; }
-.admin-btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.admin-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Matches the brand gradient every other primary CTA in the app already
+   uses (auth.css .submit-btn, style.css .browse-btn/.process-btn) - this
+   was the only surface still on a flat accent fill. */
+.admin-btn-primary {
+  background: var(--gradient); color: #fff; border-color: transparent;
+  box-shadow: 0 4px 14px rgba(0,122,61,0.3);
+  transition: opacity .15s, transform .15s, box-shadow .15s;
+}
+.admin-btn-primary:hover { opacity: .92; transform: translateY(-1px); box-shadow: 0 6px 18px rgba(0,122,61,0.4); }
 .admin-btn-danger { background: transparent; color: #e04848; border-color: #e0484855; }
 
 .admin-icon-btn {
-  width: 36px; height: 36px;
+  width: 40px; height: 40px;
   display: flex; align-items: center; justify-content: center;
   border-radius: 50%;
   border: 1px solid var(--border);
@@ -71,21 +108,94 @@
   color: var(--text);
   cursor: pointer;
 }
-.admin-icon-btn:hover { opacity: .8; }
+.admin-icon-btn:hover { opacity: .8; border-color: var(--accent); color: var(--accent); }
+.admin-icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-.admin-main { padding: 28px; max-width: 1200px; margin: 0 auto; }
+.admin-main { flex: 1; min-width: 0; padding: 32px 40px 40px; }
+
+/* ── Page header (title + primary action, per tab) ─────────────────
+   Moves the "+ New ..." CTA out of the sidebar nav and into the content
+   area, next to the heading it actually belongs to - sidebar stays pure
+   navigation, and the action reads as scoped to the page you're looking
+   at rather than a global button sitting among nav links. */
+.admin-page-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; margin-bottom: 28px;
+}
+.admin-page-heading h1 {
+  font-size: 23px; font-weight: 800; letter-spacing: -0.015em; color: var(--text);
+}
+.admin-page-heading p {
+  margin-top: 5px; font-size: 14px; color: var(--text-muted, #64748b);
+}
+/* The header's CTA is the page's one primary action, not a modal Save
+   button - it was inheriting .admin-btn's compact modal-button sizing
+   (9px/16px, 14px type), which reads thin next to a 23px bold heading.
+   Scoped to this header only; modal buttons keep their smaller size. */
+.admin-page-header .admin-btn-primary {
+  padding: 13px 26px; font-size: 15px; font-weight: 700;
+  letter-spacing: -0.01em; flex-shrink: 0;
+  box-shadow: 0 6px 20px rgba(0,122,61,0.35);
+}
+.admin-page-header .admin-btn-primary:hover {
+  box-shadow: 0 8px 26px rgba(0,122,61,0.45);
+}
 
 .kb-empty {
   text-align: center;
-  padding: 80px 20px;
+  padding: 72px 20px;
   color: var(--text-muted, #64748b);
 }
+.kb-empty svg { color: var(--text-subtle, #94a3b8); margin-bottom: 14px; }
 .kb-empty p { margin-bottom: 16px; font-size: 15px; }
+
+/* ── Summary stats row - computed live from the real KB list in
+   admin.js's renderKbStats(), never hardcoded. ─────────────────── */
+.kb-stats-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 14px;
+  margin-bottom: 20px;
+}
+.kb-stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 10px);
+  padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.kb-stat-label {
+  font-size: 11px; font-weight: 700; color: var(--text-subtle, #94a3b8);
+  text-transform: uppercase; letter-spacing: .06em;
+}
+.kb-stat-value { font-size: 24px; font-weight: 800; color: var(--text); }
+.kb-stat-value--accent { color: var(--accent); }
 
 .kb-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
   gap: 18px;
+}
+
+/* ── "Create new" tile - flows in the grid alongside real KB cards ── */
+.kb-create-tile {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; min-height: 180px;
+  background: transparent;
+  border: 2px dashed var(--border-2, var(--border));
+  border-radius: var(--radius, 14px);
+  color: var(--text-subtle, #94a3b8);
+  font-size: 14px; font-weight: 600; font-family: inherit;
+  cursor: pointer; transition: border-color .15s, color .15s, background .15s;
+}
+.kb-create-tile:hover {
+  border-color: var(--accent); color: var(--accent);
+  background: rgba(0,122,61,0.04);
+}
+.kb-create-tile-icon {
+  width: 40px; height: 40px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  border: 1.5px solid currentColor;
 }
 
 .kb-card {
@@ -96,12 +206,19 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  box-shadow: 0 2px 10px rgba(0,122,61,0.06);
+  transition: transform .15s, box-shadow .15s, border-color .15s;
+}
+.kb-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 28px rgba(0,122,61,0.12);
+  border-color: rgba(0,122,61,0.25);
 }
 
 .kb-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
 .kb-card-name-row { display: flex; align-items: center; gap: 6px; }
-.kb-card-name { font-size: 15.5px; font-weight: 700; overflow-wrap: anywhere; min-width: 0; }
-.kb-card-desc { font-size: 13px; color: var(--text-muted, #64748b); min-height: 18px; overflow-wrap: anywhere; }
+.kb-card-name { font-size: 16.5px; font-weight: 700; overflow-wrap: anywhere; min-width: 0; }
+.kb-card-desc { font-size: 14px; color: var(--text-muted, #64748b); min-height: 18px; overflow-wrap: anywhere; }
 
 .kb-rename-btn {
   background: none; border: none; cursor: pointer;
@@ -112,11 +229,12 @@
 
 .kb-processing-badge {
   display: flex; align-items: center; gap: 7px;
-  font-size: 12px; font-weight: 600;
+  font-size: 13px; font-weight: 600;
   color: #d97706;
   background: rgba(217,119,6,.1);
   border-radius: 8px;
   padding: 6px 10px;
+  overflow-wrap: anywhere;
 }
 .kb-spinner {
   width: 11px; height: 11px; flex: none;
@@ -128,7 +246,7 @@
 @keyframes kb-spin { to { transform: rotate(360deg); } }
 
 .kb-status-badge {
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 700;
   padding: 3px 9px;
   border-radius: 20px;
@@ -136,24 +254,42 @@
   letter-spacing: .03em;
   white-space: nowrap;
 }
-.kb-status-badge.active { background: rgba(13,148,136,.15); color: var(--success, #0d9488); }
+.kb-status-badge.active {
+  background: rgba(13,148,136,.15); color: var(--success, #0d9488);
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.kb-status-badge.active::before {
+  content: ""; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--success, #0d9488);
+  animation: kb-status-pulse 2s infinite;
+}
+@keyframes kb-status-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(13,148,136,0.4); }
+  50% { opacity: 0.7; box-shadow: 0 0 0 3px rgba(13,148,136,0); }
+}
 .kb-status-badge.inactive { background: rgba(148,163,184,.2); color: #64748b; }
 
 .kb-card-meta {
   display: flex;
   justify-content: space-between;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-subtle, #94a3b8);
+  gap: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
 }
+.kb-card-meta span { display: inline-flex; align-items: center; gap: 5px; overflow-wrap: anywhere; min-width: 0; }
+.kb-card-meta svg { flex: none; }
 
 .kb-toggle-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
 }
-.kb-toggle-label { font-size: 13px; font-weight: 600; }
+.kb-toggle-label {
+  font-size: 11.5px; font-weight: 700; color: var(--text-subtle, #94a3b8);
+  text-transform: uppercase; letter-spacing: .05em;
+}
 
 .kb-switch { position: relative; width: 40px; height: 22px; display: inline-block; flex: none; }
 .kb-switch input { opacity: 0; width: 0; height: 0; }
@@ -169,7 +305,9 @@
 .kb-switch input:checked + .kb-switch-track::before { transform: translateX(18px); }
 
 .kb-card-actions { display: flex; gap: 8px; margin-top: 4px; }
-.kb-card-actions .admin-btn { flex: 1; font-size: 12.5px; padding: 7px 10px; }
+.kb-card-actions .admin-btn { flex: 1; justify-content: center; font-size: 13.5px; padding: 8px 10px; }
+.kb-card-actions .admin-btn:not(.admin-btn-danger):hover { border-color: var(--accent); color: var(--accent); opacity: 1; }
+.kb-card-actions .admin-btn-danger:hover { background: #e04848; color: #fff; opacity: 1; }
 
 /* ── Modals ── */
 .admin-modal-backdrop {
@@ -177,6 +315,12 @@
   background: rgba(0,0,0,.45);
   display: flex; align-items: center; justify-content: center;
   padding: 20px;
+  animation: admin-modal-fade .15s ease;
+}
+@keyframes admin-modal-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes admin-modal-pop {
+  from { opacity: 0; transform: scale(0.97) translateY(6px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
 }
 .admin-modal {
   background: var(--surface);
@@ -184,11 +328,40 @@
   padding: 24px;
   width: 100%;
   max-width: 420px;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
   border: 1px solid var(--border);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+  animation: admin-modal-pop .18s cubic-bezier(0.16,1,0.3,1);
 }
-.admin-modal-lg { max-width: 760px; }
-.admin-modal h3 { margin-bottom: 16px; font-size: 16px; overflow-wrap: anywhere; }
+.admin-modal-lg { max-width: 860px; padding: 32px; }
+.admin-modal h3 {
+  margin-bottom: 16px; padding-bottom: 14px; font-size: 16px; overflow-wrap: anywhere;
+  border-bottom: 1px solid var(--border);
+}
+.admin-modal-lg h3 { font-size: 19px; margin-bottom: 22px; padding-bottom: 16px; }
 .admin-modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+.admin-modal-lg .admin-modal-actions { margin-top: 24px; }
+
+/* Dark-mode override for the shared .field/.input-wrap input markup (built
+   in auth.css for the always-white login card) when it's reused inside an
+   admin modal, which DOES switch to the dark surface - without this the
+   text inputs stayed hardcoded white-on-white's opposite: a bright white
+   field glowing out of a near-black modal. Scoped to .admin-modal only, so
+   the login screen (out of scope, and meant to stay a white card) is
+   untouched. */
+html.dark .admin-modal .field label { color: var(--text-muted, #94a3b8); }
+html.dark .admin-modal .input-wrap input {
+  background: var(--input-bg, rgba(0,0,0,.25));
+  border-color: var(--border);
+  color: var(--text);
+}
+html.dark .admin-modal .input-wrap input::placeholder { color: var(--text-subtle, #475569); }
+html.dark .admin-modal .input-wrap input:focus {
+  background: var(--surface-2, var(--bg));
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(46,204,113,0.15);
+}
 
 /* ── File upload ── */
 .files-dropzone {
@@ -203,26 +376,30 @@
 .files-dropzone.dragover { border-color: var(--accent); background: var(--surface-2, var(--bg)); }
 .files-dropzone svg { margin-bottom: 6px; color: var(--accent); }
 .files-browse { color: var(--accent); font-weight: 600; cursor: pointer; text-decoration: underline; }
-.files-hint { display: block; font-size: 11.5px; margin-top: 6px; color: var(--text-subtle, #94a3b8); }
+.files-hint { display: block; font-size: 12.5px; margin-top: 6px; color: var(--text-subtle, #94a3b8); }
 
 .files-progress { margin-bottom: 14px; display: flex; flex-direction: column; gap: 6px; max-height: 140px; overflow-y: auto; }
-.files-progress-row { font-size: 12.5px; display: flex; justify-content: space-between; gap: 8px; }
+.files-progress-row { font-size: 13.5px; display: flex; justify-content: space-between; gap: 8px; overflow-wrap: anywhere; }
 .files-progress-row.error { color: #e04848; }
 .files-progress-row.done { color: var(--success, #0d9488); }
 
-.files-table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+.files-table { width: 100%; border-collapse: collapse; font-size: 14px; table-layout: fixed; }
 .files-table th {
   text-align: left; padding: 6px 8px; font-size: 11.5px; color: var(--text-subtle, #94a3b8);
   border-bottom: 1px solid var(--border); text-transform: uppercase;
 }
 .files-table td { padding: 8px 8px; border-bottom: 1px solid var(--border); }
 .files-table tbody tr:last-child td { border-bottom: none; }
-.files-table th:nth-child(1), .files-table td:nth-child(1) { width: 42%; word-break: break-word; }
-.files-table th:nth-child(2), .files-table td:nth-child(2),
-.files-table th:nth-child(3), .files-table td:nth-child(3),
-.files-table th:nth-child(4), .files-table td:nth-child(4) { width: 10%; white-space: nowrap; }
-.files-table th:nth-child(5), .files-table td:nth-child(5) { width: 20%; white-space: nowrap; }
+.files-table th:nth-child(1), .files-table td:nth-child(1) { width: 34%; word-break: break-word; }
+.files-table th:nth-child(2), .files-table td:nth-child(2) { width: 10%; white-space: nowrap; }
+.files-table th:nth-child(3), .files-table td:nth-child(3) { width: 9%; white-space: nowrap; }
+.files-table th:nth-child(4), .files-table td:nth-child(4) { width: 17%; white-space: nowrap; }
+.files-table th:nth-child(5), .files-table td:nth-child(5) { width: 22%; white-space: nowrap; }
 .files-table th:nth-child(6), .files-table td:nth-child(6) { width: 8%; }
+/* The processing badge (icon + text) is wider than a narrow status column
+   allows - without this it visually spills into the "Uploaded" cell next to
+   it instead of wrapping or clipping cleanly. */
+.files-table .kb-processing-badge { font-size: 12px; padding: 4px 8px; white-space: nowrap; }
 
 .file-delete-btn {
   background: none; border: none; cursor: pointer;
@@ -230,3 +407,157 @@
   padding: 4px; display: flex; align-items: center;
 }
 .file-delete-btn:hover { color: #e04848; }
+
+/* ── Role chips (shared by KB access + user roles) ───────────────
+   The chips are a live PREVIEW of the current selection, secondary to the
+   checklist below it - smaller type, no border, sits directly under the
+   hint line instead of looking like its own component. */
+.roles-chips { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 14px; min-height: 26px; align-items: center; }
+.roles-chips--inline { margin-bottom: 0; }
+.roles-chips-empty { font-size: 13.5px; color: var(--text-subtle, #94a3b8); font-style: italic; overflow-wrap: anywhere; }
+.role-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: rgba(13,148,136,.12); color: var(--success, #0d9488);
+  border-radius: 20px; padding: 5px 12px 5px 14px;
+  font-size: 13.5px; font-weight: 600; text-transform: capitalize;
+  max-width: 100%; overflow-wrap: anywhere;
+}
+.role-chip--readonly { padding: 4px 11px; }
+.role-chip button {
+  background: none; border: none; cursor: pointer; color: inherit;
+  font-size: 16px; line-height: 1; padding: 0; opacity: .7;
+}
+.role-chip button:hover { opacity: 1; }
+.roles-input {
+  width: 100%; padding: 9px 11px; border-radius: var(--radius-sm, 10px);
+  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  font-size: 14px; font-family: inherit;
+}
+.roles-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.roles-hint { font-size: 13px; color: var(--text-subtle, #94a3b8); margin-bottom: 10px; overflow-wrap: anywhere; }
+
+/* ── Role checklist (shared by KB access + user roles) ────────────
+   Always visible, not a collapsed dropdown - this IS the picker, not a
+   secondary control hidden behind a toggle, so it reads as the modal's
+   actual content rather than a cramped popover. A bordered card gives it
+   its own visual weight, with a header row (count + Select all/Clear all)
+   so bulk selection doesn't require clicking every box individually, and a
+   2-column grid of full-width rows uses the wider modal instead of
+   stacking everything into one tall, narrow list. */
+.roles-picker {
+  background: var(--surface-2, var(--bg)); border: 1px solid var(--border);
+  border-radius: var(--radius, 14px);
+  padding: 14px 16px 16px;
+}
+.roles-picker-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+}
+.roles-picker-count { font-size: 12.5px; font-weight: 600; color: var(--text-subtle, #94a3b8); text-transform: uppercase; letter-spacing: .03em; }
+.roles-picker-bulk { display: flex; align-items: center; gap: 4px; }
+.roles-picker-bulk button {
+  background: none; border: none; cursor: pointer; padding: 3px 6px;
+  font-size: 13px; font-weight: 600; color: var(--accent); border-radius: 6px;
+}
+.roles-picker-bulk button:hover { background: rgba(13,148,136,.1); }
+.roles-picker-bulk button:disabled { color: var(--text-subtle, #94a3b8); cursor: not-allowed; }
+.roles-picker-bulk-sep { color: var(--border); font-size: 13px; }
+
+.roles-dropdown-list {
+  max-height: 320px; overflow-y: auto; margin-bottom: 12px;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 4px;
+}
+.roles-dropdown-empty { grid-column: 1 / -1; font-size: 13.5px; color: var(--text-subtle, #94a3b8); padding: 10px 6px; overflow-wrap: anywhere; }
+.roles-dropdown-item {
+  display: flex; align-items: center; gap: 10px; padding: 11px 12px;
+  border-radius: var(--radius-sm, 10px); cursor: pointer; font-size: 14.5px;
+  color: var(--text); text-transform: capitalize; overflow-wrap: anywhere;
+  transition: background .12s;
+}
+.roles-dropdown-item:hover { background: var(--surface); }
+.roles-dropdown-item.is-checked { background: rgba(13,148,136,.1); font-weight: 600; color: var(--success, #0d9488); }
+.roles-dropdown-item input {
+  cursor: pointer; flex: none; width: 18px; height: 18px; accent-color: var(--accent);
+}
+.roles-dropdown-item input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.roles-dropdown-item span { min-width: 0; overflow-wrap: anywhere; }
+.roles-dropdown-newrow { display: flex; gap: 8px; border-top: 1px solid var(--border); padding-top: 12px; }
+.roles-dropdown-newrow .roles-input { flex: 1; padding: 10px 12px; font-size: 14px; }
+.roles-dropdown-newrow button { padding: 10px 16px; font-size: 14px; }
+
+.kb-access-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding-top: 4px;
+}
+.kb-access-summary {
+  background: var(--surface-2, var(--bg)); border: 1px solid var(--border); cursor: pointer;
+  padding: 6px 9px; border-radius: var(--radius-sm, 10px);
+  display: flex; align-items: center; flex-wrap: wrap; gap: 5px; justify-content: flex-end;
+  max-width: 75%; color: var(--text-subtle, #94a3b8);
+}
+.kb-access-summary:hover { border-color: var(--accent); }
+.kb-access-summary:hover .kb-access-edit-icon { color: var(--accent); }
+.kb-access-edit-icon { flex: none; color: var(--text-subtle, #94a3b8); }
+
+/* ── Users table ────────────────────────────────────────────────── */
+.users-table-wrap {
+  width: 100%; overflow-x: auto;
+  border-radius: var(--radius, 14px);
+  border: 1px solid var(--border);
+}
+.users-table { width: 100%; border-collapse: collapse; font-size: 14.5px; background: var(--surface); overflow: hidden; table-layout: fixed; }
+.users-table th {
+  text-align: left; padding: 11px 14px; font-size: 12px; color: var(--text-subtle, #94a3b8);
+  border-bottom: 1px solid var(--border); text-transform: uppercase; background: var(--surface-2, var(--bg));
+}
+.users-table td { padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; overflow-wrap: anywhere; }
+.users-table tbody tr:last-child td { border-bottom: none; }
+.users-table tbody tr { transition: background .12s; }
+.users-table tbody tr:hover { background: var(--surface-2, var(--bg)); }
+.users-table th:nth-child(1), .users-table td:nth-child(1) { width: 38%; }
+.users-table th:nth-child(2), .users-table td:nth-child(2) { width: 32%; }
+.users-table th:nth-child(3), .users-table td:nth-child(3) { width: 16%; white-space: nowrap; }
+/* A fixed pixel width (rather than a %) keeps the "Edit roles" button from
+   being squeezed into a sliver and collapsing into a vertical letter-stack
+   at viewport widths narrower than ~1200px, well above the sidebar's own
+   mobile breakpoint. */
+.users-table th:nth-child(4), .users-table td:nth-child(4) { width: 118px; }
+.users-table td:nth-child(4) .admin-btn { white-space: nowrap; }
+
+.user-cell { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.user-avatar {
+  width: 32px; height: 32px; flex: none; border-radius: 50%;
+  background: var(--gradient); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; letter-spacing: .02em;
+}
+.user-cell-text { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.user-cell-name { font-weight: 600; overflow-wrap: anywhere; }
+.user-cell-email { font-size: 12.5px; color: var(--text-subtle, #94a3b8); overflow-wrap: anywhere; }
+
+/* ── Narrow screens - sidebar collapses to a top bar ───────────────── */
+@media (max-width: 720px) {
+  .admin-dashboard { flex-direction: column; }
+  .admin-sidebar {
+    width: 100%; min-height: auto; flex-direction: row; flex-wrap: wrap;
+    align-items: center; padding: 12px 14px; gap: 10px;
+  }
+  .admin-sidebar-brand { padding: 0 8px 0 0; }
+  .admin-nav { flex-direction: row; flex-wrap: wrap; }
+  .admin-sidebar-footer {
+    margin-top: 0; padding-top: 0; border-top: none;
+    border-left: 1px solid var(--border); padding-left: 10px;
+    margin-left: auto;
+  }
+  .admin-main { padding: 18px; }
+  .admin-page-header { flex-direction: column; align-items: stretch; gap: 12px; margin-bottom: 20px; }
+  .admin-page-header .admin-btn-primary { width: 100%; }
+  /* A fixed layout forces every column (incl. the "Edit roles" button) into
+     a sliver of its desktop width - switch to content-sized columns and let
+     the wrapper scroll horizontally instead of mangling the button text. */
+  .users-table { table-layout: auto; min-width: 560px; }
+  .users-table th:nth-child(1), .users-table td:nth-child(1),
+  .users-table th:nth-child(2), .users-table td:nth-child(2),
+  .users-table th:nth-child(3), .users-table td:nth-child(3),
+  .users-table th:nth-child(4), .users-table td:nth-child(4) { width: auto; white-space: nowrap; }
+}

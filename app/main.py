@@ -37,7 +37,7 @@ _PUBLIC_PREFIXES = (
     "/privacy", "/terms",
     "/admin.html", "/admin.css", "/admin.js",
 )
-_PROTECTED_PREFIXES = ("/chat/", "/upload/", "/connectors/", "/knowledge-bases")
+_PROTECTED_PREFIXES = ("/chat/", "/upload/", "/connectors/", "/knowledge-bases", "/sessions/")
 
 # Routes under here require a token whose decoded role == "admin" - stricter
 # than _PROTECTED_PREFIXES, which just requires any logged-in user.

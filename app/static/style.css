@@ -26,10 +26,10 @@
   --success:      #0d9488;
   --error:        #dc2626;
   --warning:      #d97706;
-  --radius:       14px;
-  --radius-sm:    10px;
+  --radius:       20px;
+  --radius-sm:    14px;
   --sidebar-w:      380px;
-  --sidebar-rail-w: 264px;
+  --sidebar-rail-w: 268px;
   --header-h:       64px;
   --shadow:       0 4px 24px rgba(0,122,61,0.1);
   --shadow-sm:    0 2px 8px rgba(0,122,61,0.08);
@@ -85,8 +85,20 @@ body::before {
   content: '';
   position: fixed;
   top: -200px; left: -200px;
-  width: 600px; height: 600px;
-  background: radial-gradient(circle, rgba(0,122,61,0.06) 0%, transparent 70%);
+  width: 700px; height: 700px;
+  background: radial-gradient(circle, rgba(0,122,61,0.14) 0%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+/* Second color blob - echoes the purple accent already used on the auth
+   page, so the chat UI, auth page and admin dashboard share one visible
+   two-tone background language instead of a single faint green smudge. */
+body::after {
+  content: '';
+  position: fixed;
+  bottom: -220px; right: -180px;
+  width: 650px; height: 650px;
+  background: radial-gradient(circle, rgba(168,85,247,0.1) 0%, transparent 70%);
   pointer-events: none;
   z-index: 0;
 }
@@ -96,6 +108,14 @@ body::before {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 99px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--accent); opacity: 0.4; }
+
+/* ── Text selection & focus rings ───────────────────────────────
+   Unthemed, these fall back to the browser's default blue, which reads
+   as unbuilt against the green brand everywhere else. */
+::selection { background: rgba(0,122,61,0.25); color: var(--text); }
+a:focus-visible, button:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px;
+}
 
 /* ── Header ─────────────────────────────────────────────────── */
 .header {
@@ -217,19 +237,19 @@ body::before {
   gap: 2px;
 }
 .sidebar-nav-btn {
-  display: flex; flex-direction: row; align-items: center; gap: 12px;
+  display: flex; flex-direction: row; align-items: center; gap: 10px;
   width: 100%;
-  padding: 11px 12px;
+  padding: 8px 10px;
   background: none; border: none; border-radius: var(--radius-sm);
   color: var(--text-muted);
-  font-family: inherit; font-size: 15px; font-weight: 600;
+  font-family: inherit; font-size: 14px; font-weight: 600;
   text-align: left;
   cursor: pointer;
   transition: all var(--transition);
 }
 .sidebar-nav-btn svg { flex-shrink: 0; }
 .sidebar-nav-btn:hover { color: var(--text); background: var(--bg-2); }
-.sidebar-nav-btn.active { color: #fff; background: var(--accent); }
+.sidebar-nav-btn.active { color: var(--accent); background: rgba(0,122,61,0.1); font-weight: 700; }
 
 /* ── Knowledge base list (replaces the old header dropdown) ─────── */
 .kb-list { display: flex; flex-direction: column; gap: 12px; }
@@ -402,6 +422,7 @@ html.dark .thinking-toggle-label input:checked + .thinking-toggle-slider { backg
 .attached-docs-list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
 .attached-docs-row { font-size: 14px; color: var(--text); background: var(--surface-2); border-radius: 6px; padding: 6px 10px; word-break: break-word; }
 .attached-docs-empty { font-size: 13.5px; color: var(--text-subtle); padding: 4px 2px; }
+.attached-docs-source { font-size: 12px; color: var(--text-subtle); }
 
 /* Composer attachments popover - opens upward (anchored near the bottom
    input bar) instead of the header badge's downward-opening default, and
@@ -430,17 +451,14 @@ html.dark .thinking-toggle-label input:checked + .thinking-toggle-slider { backg
 
 /* ── Sidebar - slim icon-only rail ───────────────────────────────
    Holds just the nav (Upload/Connect/Knowledge/Settings). Its content
-   lives in .side-drawer instead, which overlays the chat area rather
-   than stacking inline below a cramped column. */
+   lives in .side-drawer instead, which shares the layout with the chat
+   area (shrinking it) rather than stacking inline below a cramped column. */
 .sidebar {
   width: var(--sidebar-rail-w); flex-shrink: 0;
   background: var(--surface);
   border-right: 1px solid var(--border);
   display: flex; flex-direction: column;
-  /* Top padding is taller than the sides/bottom so sidebar content clears the
-     fixed #sidebar-hamburger button (it sits just below the header, overlapping
-     the sidebar's top-right corner otherwise). */
-  padding: 48px 10px 22px;
+  padding: 16px 9px 18px;
   box-shadow: 2px 0 12px rgba(0,122,61,0.04);
 }
 .sidebar-title {
@@ -448,19 +466,98 @@ html.dark .thinking-toggle-label input:checked + .thinking-toggle-slider { backg
   letter-spacing: 0.1em; color: var(--text-subtle); padding: 0 4px;
 }
 
-/* ── Side drawer - overlay panel opened by the rail's nav ─────────
-   Default (e.g. Upload) is a compact panel, similar to how Claude's
-   own interface shows a small file-attach area rather than taking
-   over the screen. Connect/Knowledge/Settings opt into
-   .side-drawer--wide, which covers the full right side instead. */
+/* ── Workspace branding card (top of sidebar) ─────────────────── */
+.sidebar-workspace {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 9px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  margin-bottom: 10px;
+}
+.sidebar-workspace-logo {
+  width: 28px; height: 28px; border-radius: 8px; flex-shrink: 0;
+  background: #fff; display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 2px 8px rgba(0,122,61,0.2); overflow: hidden;
+}
+.sidebar-workspace-info { min-width: 0; }
+.sidebar-workspace-name {
+  font-size: 13.5px; font-weight: 700; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sidebar-workspace-sub { font-size: 11.5px; color: var(--text-subtle); margin-top: -1px; }
+
+/* ── Section group labels ("Workspace" / "Preferences") ──────── */
+.sidebar-section-label {
+  font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--text-subtle);
+  padding: 0 10px; margin-bottom: 4px;
+}
+.sidebar-nav + .sidebar-section-label { margin-top: 10px; }
+.sidebar-nav:has(+ .sidebar-section-label) { padding-bottom: 8px; border-bottom: 1px solid var(--border); margin-bottom: 0; }
+
+/* ── Nav icon badges (filled square, accent color when active) ─── */
+.sidebar-nav-icon {
+  width: 22px; height: 22px; border-radius: 6px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-muted); transition: background var(--transition), color var(--transition);
+}
+.sidebar-nav-btn.active .sidebar-nav-icon { background: var(--accent); color: #fff; }
+
+/* ── Badge counts (Connect / Knowledge) - populated live by chat.js,
+   never hardcoded; hidden until a real count is known. ──────────── */
+.sidebar-nav-badge {
+  margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px;
+  border-radius: 99px; background: var(--surface-3); color: var(--text-muted);
+  font-size: 11.5px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.sidebar-nav-btn.active .sidebar-nav-badge { background: rgba(0,122,61,0.15); color: var(--accent); }
+
+/* ── Footer: version line + user profile row ─────────────────── */
+.sidebar-footer { margin-top: auto; }
+.sidebar-footer-text {
+  padding: 16px 8px 10px;
+  border-top: 1px solid var(--border);
+  font-size: 11px; color: var(--text-subtle);
+}
+.sidebar-user-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 6px; border-radius: var(--radius-sm);
+  transition: background var(--transition);
+}
+.sidebar-user-row:hover { background: var(--bg-2); }
+.sidebar-user-row .user-avatar-sm { width: 30px; height: 30px; font-size: 12px; }
+.sidebar-user-row-info { flex: 1; min-width: 0; }
+.sidebar-user-row-name {
+  font-size: 13.5px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sidebar-user-row-status {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11.5px; color: var(--text-subtle); margin-top: 1px;
+}
+.sidebar-user-row-status::before {
+  content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--success);
+}
+.sidebar-user-row-more {
+  background: none; border: none; color: var(--text-subtle); cursor: pointer;
+  padding: 4px; border-radius: 6px; flex-shrink: 0; display: flex;
+  transition: background var(--transition), color var(--transition);
+}
+.sidebar-user-row-more:hover { background: var(--surface-3); color: var(--error); }
+
+/* ── Side drawer - opens the rail's nav panels ─────────────────────
+   Default (e.g. Upload) is now a real flex sibling of .sidebar/.chat-area
+   (not position:absolute), so opening/closing it resizes the chat area
+   to make room instead of floating a panel on top of it - previously the
+   chat content sat directly underneath, unreachable until the drawer was
+   closed again. Connect/Knowledge/Settings still opt into
+   .side-drawer--wide, which covers the full right side as a genuine
+   overlay (restores position:absolute for just that variant) since those
+   panels are deliberately meant to take over the screen, not share it. */
 .side-drawer {
-  position: absolute;
-  top: var(--header-h);
-  left: var(--sidebar-rail-w);
-  bottom: 0;
   width: 320px;
   max-width: calc(100vw - var(--sidebar-rail-w));
-  z-index: 50;
+  flex-shrink: 0;
   background: var(--surface);
   border-left: 1px solid var(--border-2);
   border-right: 1px solid var(--border);
@@ -470,7 +567,12 @@ html.dark .thinking-toggle-label input:checked + .thinking-toggle-slider { backg
   transition: width var(--transition);
 }
 .side-drawer--wide {
+  position: absolute;
+  top: var(--header-h);
+  left: var(--sidebar-rail-w);
+  bottom: 0;
   width: calc(100vw - var(--sidebar-rail-w));
+  z-index: 50;
 }
 .side-drawer-header {
   display: flex; align-items: center; justify-content: space-between;
@@ -848,7 +950,11 @@ html.dark .thinking-toggle-label input:checked + .thinking-toggle-slider { backg
 /* ── Chat area ───────────────────────────────────────────────── */
 .chat-area {
   flex: 1; display: flex; flex-direction: column; overflow: hidden;
-  background: var(--bg); position: relative;
+  background:
+    radial-gradient(circle at 12% 8%, rgba(0,122,61,0.09) 0%, transparent 42%),
+    radial-gradient(circle at 92% 85%, rgba(168,85,247,0.07) 0%, transparent 45%),
+    var(--bg);
+  position: relative;
 }
 .chat-area::before {
   content: ''; position: absolute; inset: 0;
@@ -869,15 +975,15 @@ html.dark .thinking-toggle-label input:checked + .thinking-toggle-slider { backg
 .welcome {
   display: flex; flex-direction: column; align-items: center;
   justify-content: center; text-align: center; gap: 20px;
-  margin: auto; max-width: 540px; padding: 40px 0;
+  margin: auto; max-width: 620px; padding: 40px 0;
   animation: fadeIn 0.7s ease;
 }
 
 .aria-welcome-avatar {
-  width: 88px; height: 88px; border-radius: 28px;
+  width: 112px; height: 112px; border-radius: 32px;
   background: #ffffff;
   display: flex; align-items: center; justify-content: center;
-  position: relative; box-shadow: 0 8px 32px rgba(0,122,61,0.35);
+  position: relative; box-shadow: 0 12px 40px rgba(0,122,61,0.4);
   animation: avatarFloat 3s ease-in-out infinite;
 }
 
@@ -902,20 +1008,21 @@ html.dark .thinking-toggle-label input:checked + .thinking-toggle-slider { backg
 }
 
 .welcome-title {
-  font-size: 28px; font-weight: 800;
+  font-size: 38px; font-weight: 800;
   background: var(--gradient);
   -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
   letter-spacing: -0.03em; line-height: 1.2;
 }
 
 .welcome-greeting {
-  font-size: 15px; color: var(--text-muted); line-height: 1.8;
-  max-width: 400px;
+  font-size: 16px; color: var(--text-muted); line-height: 1.8;
+  max-width: 420px;
 }
 
 .welcome-steps {
   display: grid; grid-template-columns: 1fr 1fr; gap: 10px; width: 100%;
 }
+.welcome-steps--3 { grid-template-columns: repeat(3, 1fr); }
 .step {
   display: flex; flex-direction: column; align-items: center; gap: 10px;
   background: var(--surface); border: 1px solid var(--border);
@@ -923,7 +1030,13 @@ html.dark .thinking-toggle-label input:checked + .thinking-toggle-slider { backg
   font-size: 13.5px; color: var(--text-muted); text-align: center;
   transition: border-color var(--transition), transform var(--transition), box-shadow var(--transition);
   box-shadow: var(--shadow-sm);
+  opacity: 0; animation: stepIn 0.45s ease both;
 }
+.step:nth-child(1) { animation-delay: 0.05s; }
+.step:nth-child(2) { animation-delay: 0.12s; }
+.step:nth-child(3) { animation-delay: 0.19s; }
+.step:nth-child(4) { animation-delay: 0.26s; }
+@keyframes stepIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 .step:hover { border-color: rgba(0,122,61,0.3); transform: translateY(-2px); box-shadow: var(--shadow); }
 .step-num {
   width: 28px; height: 28px; border-radius: 50%;
@@ -932,6 +1045,8 @@ html.dark .thinking-toggle-label input:checked + .thinking-toggle-slider { backg
   display: flex; align-items: center; justify-content: center;
   box-shadow: 0 4px 12px rgba(0,122,61,0.3);
 }
+.step-title { font-size: 14px; font-weight: 700; color: var(--text); }
+.step-desc { font-size: 12px; color: var(--text-subtle); line-height: 1.4; margin-top: -4px; }
 
 /* ── Messages ────────────────────────────────────────────────── */
 .message {
@@ -1197,11 +1312,17 @@ html.dark .thinking-toggle-label input:checked + .thinking-toggle-slider { backg
 .session-size-bar .bar-fill.warn { background: var(--warning); }
 .session-size-bar .bar-fill.danger { background: var(--error); }
 
-/* ── Sidebar hamburger toggle ───────────────────────────────── */
+/* ── Sidebar hamburger toggle ─────────────────────────────────────
+   Stays position:fixed (not a normal sidebar child) because it must
+   remain clickable to re-expand the sidebar even when .sidebar.collapsed
+   sets the sidebar's own width to 0. Aligned to sit at the right end of
+   the workspace card's row (same vertical band as "Dabur India Ltd."),
+   not floating above everything the way it previously forced the sidebar
+   into an oversized top padding just to clear it. */
 .sidebar-hamburger {
   display: flex; flex-direction: column; gap: 4px;
-  position: fixed; top: calc(var(--header-h) + 12px);
-  left: calc(var(--sidebar-rail-w) - 36px); z-index: 300;
+  position: fixed; top: calc(var(--header-h) + 25px);
+  left: calc(var(--sidebar-rail-w) - 44px); z-index: 300;
   background: var(--surface); border: 1px solid var(--border); border-radius: 7px;
   padding: 6px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,122,61,0.15);
   transition: left 0.3s ease;
