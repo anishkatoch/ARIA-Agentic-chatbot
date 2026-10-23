@@ -4,20 +4,21 @@ user OAuth.
 
 Deliberately has NO OAuth login/callback of its own - it shares the exact
 same Microsoft OAuth grant as the Outlook connector (see outlook.py's
-SCOPES, which already request Chat.Read alongside Mail.Read).
-One consent screen covers both. app.connectors.router's outlook_callback
-mirrors the token it receives into a second "outlook_chat" token_store row
-right after saving the "outlook" one, and
-/connectors/outlook-chat/auth/login just returns the same authorization URL
-Outlook's login does. Disconnecting either provider deletes both rows (see
-router.py's _LINKED_OAUTH_PROVIDERS) - from the user's perspective, Outlook
-and Outlook Chat are always connected/disconnected together, because
-underneath they're one Microsoft sign-in, not two.
+SCOPES, which already request Chat.Read alongside Mail.Read, plus the
+Sites.Read.All/Team.ReadBasic.All/etc. that sharepoint.py/teams.py need).
+One consent screen covers all four. app.connectors.router's outlook_callback
+mirrors the token it receives into "outlook_chat", "sharepoint" and "teams"
+token_store rows right after saving the "outlook" one, and
+/connectors/outlook-chat/auth/login (and sharepoint's/teams') just returns
+the same authorization URL Outlook's login does. Disconnecting any one of
+the four deletes all four rows (see router.py's _LINKED_OAUTH_PROVIDERS) -
+from the user's perspective they're always connected/disconnected together,
+because underneath it's one Microsoft sign-in, not four.
 
 Distinct from app/connectors/clients/teams.py, which reads CHANNEL messages
-app-only (client-credentials, no per-user login, needs a team/channel id
-picked in advance). This module reads the signed-in user's own 1:1/group
-chats instead, the Teams/Outlook equivalent of Google Chat's "spaces".
+(a team/channel id picked in advance) via the shared grant above - this
+module reads the signed-in user's own 1:1/group chats instead, the
+Teams/Outlook equivalent of Google Chat's "spaces".
 """
 import json
 import os

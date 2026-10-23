@@ -35,6 +35,7 @@ app/connectors/README.md for the full picture of how this package is bounded.
 import asyncio
 import logging
 import os
+import re
 import time
 import uuid
 from io import BytesIO
@@ -47,7 +48,7 @@ from pydantic import BaseModel
 
 from app.config import cfg
 from app.connectors import access_gate, token_store, credential_store
-from app.connectors.clients.github import GitHubConnector, get_github_connector
+from app.connectors.clients.github import GitHubConnector, get_github_connector, MAX_FILE_SIZE as GITHUB_MAX_FILE_SIZE
 from app.connectors.clients.gmail import get_gmail_connector
 from app.connectors.clients.google_drive import get_google_drive_connector
 from app.connectors.clients.google_chat import get_google_chat_connector
@@ -163,8 +164,8 @@ CONNECTOR_CATALOG = [
     {"id": "google_chat",  "path": "google-chat",   "name": "Google Chat",       "type": "chat",               "auth": "oauth"},
     {"id": "outlook",      "path": "outlook",       "name": "Outlook",           "type": "email",              "auth": "oauth"},
     {"id": "outlook_chat", "path": "outlook-chat",  "name": "Outlook Chat",      "type": "chat",               "auth": "oauth"},
-    {"id": "sharepoint",   "path": "sharepoint",    "name": "SharePoint",        "type": "documents",          "auth": "config"},
-    {"id": "teams",        "path": "teams",         "name": "Microsoft Teams",   "type": "chat",               "auth": "config"},
+    {"id": "sharepoint",   "path": "sharepoint",    "name": "SharePoint",        "type": "documents",          "auth": "oauth"},
+    {"id": "teams",        "path": "teams",         "name": "Microsoft Teams",   "type": "chat",               "auth": "oauth"},
     {"id": "azure_devops", "path": "azure-devops",  "name": "Azure DevOps Repos","type": "code",               "auth": "byok"},
 ]
 
@@ -199,17 +200,10 @@ def _is_configured(provider_id: str) -> bool:
     if provider_id in ("gmail", "google_drive", "google_chat"):
         vals = (os.getenv("GOOGLE_CLIENT_ID", ""), os.getenv("GOOGLE_CLIENT_SECRET", ""))
         return all(vals) and not _is_placeholder(*vals)
-    if provider_id in ("sharepoint", "teams"):
-        vals = (
-            os.getenv("MICROSOFT_TENANT_ID", ""),
-            os.getenv("MICROSOFT_CLIENT_ID", ""),
-            os.getenv("MICROSOFT_CLIENT_SECRET", ""),
-        )
-        return all(vals) and not _is_placeholder(*vals)
-    if provider_id in ("outlook", "outlook_chat"):
-        # Delegated user OAuth via the "common" authority - unlike
-        # sharepoint/teams' app-only flow, this doesn't require a specific
-        # MICROSOFT_TENANT_ID to be set.
+    if provider_id in ("outlook", "outlook_chat", "sharepoint", "teams"):
+        # All four share one delegated user OAuth grant (see outlook.py's
+        # SCOPES) via the "common" authority, so none of them require a
+        # specific MICROSOFT_TENANT_ID to be set.
         vals = (os.getenv("MICROSOFT_CLIENT_ID", ""), os.getenv("MICROSOFT_CLIENT_SECRET", ""))
         return all(vals) and not _is_placeholder(*vals)
     if provider_id == "azure_devops":
@@ -249,17 +243,20 @@ def _delete_token_and_credentials(user_id: str, provider: str) -> None:
         db.close()
 
 
-# Gmail+Google Chat (one Google OAuth grant) and Outlook+Outlook Chat (one
-# Microsoft OAuth grant) each share a single underlying token - see
-# gmail.py/outlook.py's SCOPES and gmail_callback/outlook_callback's
-# token-mirroring below. From the user's perspective, each pair is always
-# connected/disconnected together, so disconnecting either half of a pair
-# must delete both its token rows, not just the one the user clicked.
+# Gmail+Google Chat (one Google OAuth grant) and Outlook+Outlook
+# Chat+SharePoint+Teams (one Microsoft OAuth grant) each share a single
+# underlying token - see gmail.py/outlook.py's SCOPES and
+# gmail_callback/outlook_callback's token-mirroring below. From the user's
+# perspective, each group is always connected/disconnected together, so
+# disconnecting any one member must delete every member's token row, not
+# just the one the user clicked.
 _LINKED_OAUTH_PROVIDERS = {
     "gmail": ("gmail", "google_chat"),
     "google_chat": ("gmail", "google_chat"),
-    "outlook": ("outlook", "outlook_chat"),
-    "outlook_chat": ("outlook", "outlook_chat"),
+    "outlook": ("outlook", "outlook_chat", "sharepoint", "teams"),
+    "outlook_chat": ("outlook", "outlook_chat", "sharepoint", "teams"),
+    "sharepoint": ("outlook", "outlook_chat", "sharepoint", "teams"),
+    "teams": ("outlook", "outlook_chat", "sharepoint", "teams"),
 }
 
 
@@ -408,6 +405,110 @@ def download_github_file(
         media_type="application/octet-stream",
         headers=_content_disposition_header(filename),
     )
+
+
+# Directories/files that are never worth ingesting even when they're under
+# the file-size cap - VCS internals, dependency trees, build output, and
+# lockfiles. Checked against the full repo-relative path.
+_GITHUB_JUNK_DIR_RE = re.compile(
+    r"(^|/)(\.git|node_modules|dist|build|target|vendor|venv|\.venv|__pycache__|\.next|coverage|\.pytest_cache)(/|$)"
+)
+_GITHUB_JUNK_FILE_RE = re.compile(
+    r"(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|Cargo\.lock|go\.sum)$"
+)
+
+
+def _github_path_is_junk(path: str) -> bool:
+    return bool(_GITHUB_JUNK_DIR_RE.search(path)) or bool(_GITHUB_JUNK_FILE_RE.search(path))
+
+
+class GithubBulkIngestRequest(BaseModel):
+    # "selected": ingest exactly the given `paths` within owner/repo.
+    # "repo": ingest the whole repo tree, skipping junk/binaries, up to
+    #         cfg.gmail_bulk_ingest_limit files.
+    mode: str
+    owner: str
+    repo: str
+    ref: str | None = None
+    paths: list[str] | None = None
+    session_id: str | None = None
+
+
+@router.post("/github/ingest/bulk")
+async def github_ingest_bulk(request: Request, body: GithubBulkIngestRequest,
+                              x_client_token: str = Header(default=None)):
+    """Ingests many files from one GitHub repo in one call, streaming SSE
+    progress - mirrors gmail_ingest_bulk's shape (see its docstring).
+    "repo" mode walks the whole tree via the Git Trees API (one recursive
+    call), drops common junk (.git, node_modules, build output, lockfiles)
+    and anything whose extension ingest_bytes() won't accept, then ingests
+    what's left up to cfg.gmail_bulk_ingest_limit files."""
+    user_id = _user_id(request)
+    client_token = f"connector:{user_id}"
+    connector = get_github_connector(user_id)
+
+    if body.mode == "selected":
+        if not body.paths:
+            raise HTTPException(400, "paths is required for mode='selected'")
+        paths = body.paths[:cfg.gmail_bulk_ingest_limit]
+    elif body.mode == "repo":
+        tree = connector.list_repo_tree(body.owner, body.repo, body.ref)
+        paths = [
+            item["path"] for item in tree["items"]
+            if not _github_path_is_junk(item["path"])
+            and pipeline_bridge.is_supported_extension(item["path"])
+            and item["size"] <= GITHUB_MAX_FILE_SIZE
+        ][:cfg.gmail_bulk_ingest_limit]
+    else:
+        raise HTTPException(400, "mode must be one of: selected, repo")
+
+    async def stream() -> AsyncGenerator[str, None]:
+        t0 = time.time()
+        session_id = body.session_id
+        total = len(paths)
+        ingested = 0
+
+        if total == 0:
+            yield sse({"type": "complete", "session_id": session_id, "total_elapsed": 0.0,
+                       "completion_message": "No matching files found"})
+            return
+
+        if body.mode == "repo" and total >= cfg.gmail_bulk_ingest_limit:
+            yield sse({"type": "warning",
+                       "message": f"Capped at {cfg.gmail_bulk_ingest_limit} files for this bulk ingest."})
+            await asyncio.sleep(0)
+
+        for i, path in enumerate(paths):
+            stage = f"github_{i}"
+            yield sse({"type": "step", "status": "start", "stage": stage,
+                       "title": f"Ingesting files ({i + 1}/{total})",
+                       "message": f"Fetching {path}..."})
+            await asyncio.sleep(0)
+            t1 = time.time()
+            try:
+                content, filename = connector.download_file(body.owner, body.repo, path, body.ref)
+                result = await pipeline_bridge.ingest_bytes(
+                    provider="github", content=content, filename=filename,
+                    user_id=user_id, client_token=client_token,
+                    session_id=session_id, alt_client_token=x_client_token,
+                )
+                session_id = result["session_id"]
+                ingested += 1
+                yield sse({"type": "step", "status": "done", "stage": stage,
+                           "message": result["filename"], "elapsed": round(time.time() - t1, 2)})
+            except Exception as e:
+                logger.warning(f"[CONNECTORS][GITHUB][BULK] {path} failed: {e}")
+                yield sse({"type": "step", "status": "error", "stage": stage,
+                           "message": f"{path} failed: {e}"})
+            await asyncio.sleep(0)
+
+        yield sse({
+            "type": "complete", "session_id": session_id,
+            "total_elapsed": round(time.time() - t0, 2),
+            "completion_message": f"Ingested {ingested}/{total} files - ready to chat!",
+        })
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers=SSE_HEADERS)
 
 
 # ==========================================
@@ -788,6 +889,108 @@ def google_drive_download(file_id: str, request: Request):
     )
 
 
+_DRIVE_WORKSPACE_PREFIX = "application/vnd.google-apps."
+
+
+def _drive_file_ingestable(f: dict) -> bool:
+    mime = f.get("mimeType", "")
+    if mime == f"{_DRIVE_WORKSPACE_PREFIX}folder":
+        return False
+    if mime.startswith(_DRIVE_WORKSPACE_PREFIX):
+        # Docs/Sheets/Slides/Drawings etc. - download_file() exports these
+        # to pdf/csv regardless of their (extension-less) Drive name.
+        return True
+    return pipeline_bridge.is_supported_extension(f.get("name") or "")
+
+
+class GoogleDriveBulkIngestRequest(BaseModel):
+    # "selected": ingest exactly the given `file_ids`.
+    # "folder": ingest every file inside `folder_id` and its subfolders.
+    # "all": ingest every file in this user's Drive (My Drive + shared drives).
+    mode: str
+    folder_id: str | None = None
+    file_ids: list[str] | None = None
+    session_id: str | None = None
+
+
+@router.post("/google-drive/ingest/bulk")
+async def google_drive_ingest_bulk(request: Request, body: GoogleDriveBulkIngestRequest,
+                                    x_client_token: str = Header(default=None)):
+    """Ingests many Google Drive files in one call, streaming SSE progress -
+    mirrors gmail_ingest_bulk's shape (see its docstring). "folder" mode
+    walks the given folder and all of its subfolders; "all" mode walks the
+    user's entire Drive. Both skip non-text/binary files automatically
+    (Workspace Docs/Sheets/Slides still get exported and ingested, same as
+    the single-file path) and are capped at cfg.gmail_bulk_ingest_limit raw
+    listing entries before that filter is applied."""
+    user_id = _user_id(request)
+    client_token = f"connector:{user_id}"
+    connector = get_google_drive_connector(user_id)
+
+    if body.mode == "selected":
+        if not body.file_ids:
+            raise HTTPException(400, "file_ids is required for mode='selected'")
+        file_ids = body.file_ids[:cfg.gmail_bulk_ingest_limit]
+    elif body.mode == "folder":
+        if not body.folder_id:
+            raise HTTPException(400, "folder_id is required for mode='folder'")
+        files = connector.list_file_ids_bulk(folder_id=body.folder_id, limit=cfg.gmail_bulk_ingest_limit)
+        file_ids = [f["id"] for f in files if _drive_file_ingestable(f)]
+    elif body.mode == "all":
+        files = connector.list_file_ids_bulk(folder_id=None, limit=cfg.gmail_bulk_ingest_limit)
+        file_ids = [f["id"] for f in files if _drive_file_ingestable(f)]
+    else:
+        raise HTTPException(400, "mode must be one of: selected, folder, all")
+
+    async def stream() -> AsyncGenerator[str, None]:
+        t0 = time.time()
+        session_id = body.session_id
+        total = len(file_ids)
+        ingested = 0
+
+        if total == 0:
+            yield sse({"type": "complete", "session_id": session_id, "total_elapsed": 0.0,
+                       "completion_message": "No matching files found"})
+            return
+
+        if body.mode in ("folder", "all") and total >= cfg.gmail_bulk_ingest_limit:
+            yield sse({"type": "warning",
+                       "message": f"Capped at {cfg.gmail_bulk_ingest_limit} files for this bulk ingest."})
+            await asyncio.sleep(0)
+
+        for i, file_id in enumerate(file_ids):
+            stage = f"gdrive_{i}"
+            yield sse({"type": "step", "status": "start", "stage": stage,
+                       "title": f"Ingesting files ({i + 1}/{total})",
+                       "message": f"Fetching file {i + 1} of {total}..."})
+            await asyncio.sleep(0)
+            t1 = time.time()
+            try:
+                content, filename = connector.download_file(file_id)
+                result = await pipeline_bridge.ingest_bytes(
+                    provider="google_drive", content=content, filename=filename,
+                    user_id=user_id, client_token=client_token,
+                    session_id=session_id, alt_client_token=x_client_token,
+                )
+                session_id = result["session_id"]
+                ingested += 1
+                yield sse({"type": "step", "status": "done", "stage": stage,
+                           "message": result["filename"], "elapsed": round(time.time() - t1, 2)})
+            except Exception as e:
+                logger.warning(f"[CONNECTORS][GOOGLE_DRIVE][BULK] file {file_id} failed: {e}")
+                yield sse({"type": "step", "status": "error", "stage": stage,
+                           "message": f"File {i + 1} failed: {e}"})
+            await asyncio.sleep(0)
+
+        yield sse({
+            "type": "complete", "session_id": session_id,
+            "total_elapsed": round(time.time() - t0, 2),
+            "completion_message": f"Ingested {ingested}/{total} files - ready to chat!",
+        })
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
 @oauth_callback_router.get("/google-drive/callback")
 def google_drive_callback(code: str = Query(...), state: str = Query(default="")):
     user_id = state
@@ -946,18 +1149,20 @@ def outlook_callback(code: str = Query(...), state: str = Query(default="")):
     connector = get_outlook_connector(user_id)
     connector.exchange_code_for_token(code)
 
-    # Outlook Chat shares this exact OAuth grant (outlook.py's SCOPES already
-    # request Chat.Read) - mirror the token into a second "outlook_chat" row
-    # so connecting Outlook connects Outlook Chat too, with no separate
-    # consent step or callback.
+    # Outlook Chat, SharePoint and Teams all share this exact OAuth grant
+    # (outlook.py's SCOPES already request Chat.Read/Sites.Read.All/
+    # Team.ReadBasic.All/etc.) - mirror the token into each of their own rows
+    # so connecting Outlook connects all three too, with no separate consent
+    # step or callback.
     outlook_token = token_store.get_token(user_id, "outlook")
     if outlook_token:
-        token_store.save_token(
-            user_id, "outlook_chat",
-            access_token=outlook_token["access_token"],
-            refresh_token=outlook_token["refresh_token"],
-            expires_at=outlook_token["expires_at"],
-        )
+        for linked_provider in ("outlook_chat", "sharepoint", "teams"):
+            token_store.save_token(
+                user_id, linked_provider,
+                access_token=outlook_token["access_token"],
+                refresh_token=outlook_token["refresh_token"],
+                expires_at=outlook_token["expires_at"],
+            )
 
     return RedirectResponse(url="/?connected=outlook")
 
@@ -1073,42 +1278,51 @@ async def outlook_chat_ingest_bulk(request: Request, body: OutlookChatBulkIngest
 
 
 # ==========================================
-# Microsoft SharePoint Connector Endpoints
+# Microsoft SharePoint Connector Endpoints (shares Outlook's OAuth grant - no
+# callback of its own; see outlook_callback above and get_authorization_url
+# in outlook.py)
 # ==========================================
+@router.get("/sharepoint/auth/login")
+def sharepoint_login(request: Request):
+    connector = get_outlook_connector(_user_id(request))
+    auth_url = connector.get_authorization_url()
+    return {"auth_url": auth_url}
+
+
 @router.get("/sharepoint/sites")
-def sharepoint_sites(search: str | None = None):
+def sharepoint_sites(request: Request, search: str | None = None):
     try:
-        return {"value": SharePointConnector().list_sites(search)}
+        return {"value": SharePointConnector(_user_id(request)).list_sites(search)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except MicrosoftGraphError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @router.get("/sharepoint/sites/{site_id}/drives")
-def sharepoint_drives(site_id: str):
+def sharepoint_drives(site_id: str, request: Request):
     try:
-        return {"value": SharePointConnector().list_drives(site_id)}
+        return {"value": SharePointConnector(_user_id(request)).list_drives(site_id)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except MicrosoftGraphError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @router.get("/sharepoint/drives/{drive_id}/items")
-def sharepoint_items(drive_id: str, folder_id: str = Query(default="root")):
+def sharepoint_items(drive_id: str, request: Request, folder_id: str = Query(default="root")):
     try:
-        return {"value": SharePointConnector().list_items(drive_id, folder_id)}
+        return {"value": SharePointConnector(_user_id(request)).list_items(drive_id, folder_id)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except MicrosoftGraphError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @router.get("/sharepoint/drives/{drive_id}/items/{item_id}/download")
-def sharepoint_download(drive_id: str, item_id: str):
+def sharepoint_download(drive_id: str, item_id: str, request: Request):
     try:
-        content, filename = SharePointConnector().download_item(drive_id, item_id)
+        content, filename = SharePointConnector(_user_id(request)).download_item(drive_id, item_id)
         return StreamingResponse(
             BytesIO(content),
             media_type="application/octet-stream",
@@ -1117,44 +1331,54 @@ def sharepoint_download(drive_id: str, item_id: str):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except MicrosoftGraphError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 # ==========================================
-# Microsoft Teams Connector Endpoints
+# Microsoft Teams Connector Endpoints (shares Outlook's OAuth grant - no
+# callback of its own; see outlook_callback above and get_authorization_url
+# in outlook.py)
 # ==========================================
+@router.get("/teams/auth/login")
+def teams_login(request: Request):
+    connector = get_outlook_connector(_user_id(request))
+    auth_url = connector.get_authorization_url()
+    return {"auth_url": auth_url}
+
+
 @router.get("/teams/list")
-def teams_list():
+def teams_list(request: Request):
     try:
-        return {"value": TeamsConnector().list_teams()}
+        return {"value": TeamsConnector(_user_id(request)).list_teams()}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except MicrosoftGraphError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @router.get("/teams/{team_id}/channels")
-def teams_channels(team_id: str):
+def teams_channels(team_id: str, request: Request):
     try:
-        return {"value": TeamsConnector().list_channels(team_id)}
+        return {"value": TeamsConnector(_user_id(request)).list_channels(team_id)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except MicrosoftGraphError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @router.get("/teams/{team_id}/channels/{channel_id}/messages")
 def teams_messages(
     team_id: str,
     channel_id: str,
+    request: Request,
     limit: int = Query(default=50, ge=1, le=100),
 ):
     try:
-        return {"value": TeamsConnector().list_channel_messages(team_id, channel_id, limit)}
+        return {"value": TeamsConnector(_user_id(request)).list_channel_messages(team_id, channel_id, limit)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except MicrosoftGraphError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 # ==========================================
@@ -1264,11 +1488,11 @@ async def _fetch_connector_file(provider: str, body: dict, user_id: str) -> tupl
         if not (drive_id and item_id):
             raise HTTPException(400, "drive_id and item_id are required for sharepoint")
         try:
-            return SharePointConnector().download_item(drive_id, item_id)
+            return SharePointConnector(user_id).download_item(drive_id, item_id)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         except MicrosoftGraphError as exc:
-            raise HTTPException(502, str(exc)) from exc
+            raise HTTPException(exc.status_code, str(exc)) from exc
 
     if provider == "azure_devops":
         project, repo_id, path = body.get("project"), body.get("repo_id"), body.get("path")
@@ -1288,11 +1512,11 @@ async def _fetch_connector_file(provider: str, body: dict, user_id: str) -> tupl
         if not (team_id and channel_id):
             raise HTTPException(400, "team_id and channel_id are required for teams")
         try:
-            messages = TeamsConnector().list_channel_messages(team_id, channel_id, body.get("limit", 50))
+            messages = TeamsConnector(user_id).list_channel_messages(team_id, channel_id, body.get("limit", 50))
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         except MicrosoftGraphError as exc:
-            raise HTTPException(502, str(exc)) from exc
+            raise HTTPException(exc.status_code, str(exc)) from exc
         lines = []
         for m in messages:
             body_content = (m.get("body") or {}).get("content", "")

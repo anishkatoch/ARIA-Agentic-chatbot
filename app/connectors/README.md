@@ -146,15 +146,20 @@ GOOGLE_CLIENT_SECRET=your-google-client-secret
 GOOGLE_REDIRECT_URI=http://localhost:8000/gmail/callback
 GOOGLE_DRIVE_REDIRECT_URI=http://localhost:8000/google-drive/callback
 
-# Microsoft Entra ID / Microsoft Graph - SharePoint + Teams (app-only,
-# client-credentials) AND Outlook + Outlook Chat (delegated user OAuth,
-# same app registration's client id/secret, Outlook Chat shares Outlook's
-# grant - no separate client id/secret/redirect for it).
+# Microsoft Entra ID / Microsoft Graph - shared by Outlook + Outlook Chat +
+# SharePoint + Teams, all four delegated user OAuth under ONE Microsoft
+# sign-in/consent (same app registration's client id/secret; Outlook Chat,
+# SharePoint and Teams each share Outlook's grant - no separate client id/
+# secret/redirect for any of them). Connecting or disconnecting any one of
+# the four connects/disconnects all four - see router.py's
+# _LINKED_OAUTH_PROVIDERS.
 MICROSOFT_TENANT_ID=your-tenant-id
 MICROSOFT_CLIENT_ID=your-application-client-id
 MICROSOFT_CLIENT_SECRET=your-client-secret
 # Must match a "Web" platform redirect URI on that same app registration,
-# with Mail.Read + Chat.Read + offline_access delegated permissions granted.
+# with Mail.Read + Chat.Read + Sites.Read.All + Team.ReadBasic.All +
+# Channel.ReadBasic.All + ChannelMessage.Read.All + offline_access delegated
+# permissions granted (admin consent is typically required for these).
 OUTLOOK_REDIRECT_URI=http://localhost:8000/outlook/callback
 
 # Azure DevOps Repos

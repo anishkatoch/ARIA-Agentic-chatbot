@@ -83,10 +83,11 @@
     <p>ARIA can optionally connect to Gmail, Google Drive, Google Chat, Outlook, Outlook Chat, GitHub,
       SharePoint, Microsoft Teams, and Azure DevOps so you can pull a file, email, or chat in and chat with it. If you use this:</p>
     <ul>
-      <li>For accounts you authorize via OAuth (Gmail, Google Drive, Google Chat, Outlook, Outlook Chat), we store
-        an access/refresh token tied specifically to <strong>your</strong> user account - never shared with other
-        users of this app. Gmail+Google Chat share one Google sign-in, and Outlook+Outlook Chat share one
-        Microsoft sign-in - connecting or disconnecting either half of a pair does both together.</li>
+      <li>For accounts you authorize via OAuth (Gmail, Google Drive, Google Chat, Outlook, Outlook Chat, SharePoint,
+        Microsoft Teams), we store an access/refresh token tied specifically to <strong>your</strong> user account -
+        never shared with other users of this app. Gmail+Google Chat share one Google sign-in, and
+        Outlook+Outlook Chat+SharePoint+Teams share one Microsoft sign-in - connecting or disconnecting any one of
+        a group does all of them together.</li>
       <li>We only fetch what you explicitly browse and select in the app - we do not run background jobs that read
         your entire mailbox, drive, or repositories without your action.</li>
       <li>This feature sits behind an additional access key, separate from your normal login, specifically because

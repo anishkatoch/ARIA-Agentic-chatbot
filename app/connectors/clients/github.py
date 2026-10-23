@@ -212,6 +212,32 @@ class GitHubConnector:
 
         return content, result["name"]
 
+    def _default_branch(self, owner: str, repo: str) -> str:
+        encoded_owner = urllib.parse.quote(owner, safe="")
+        encoded_repo = urllib.parse.quote(repo, safe="")
+        info = self._request(f"/repos/{encoded_owner}/{encoded_repo}")
+        return info.get("default_branch") or "main"
+
+    def list_repo_tree(self, owner: str, repo: str, ref: str | None = None) -> dict:
+        """Full recursive file listing for a repo via the Git Trees API (one
+        call, recursive=1) - used for whole-repo bulk ingest instead of
+        walking list_contents() directory by directory. Returns only blobs
+        (files), not trees (directories)."""
+        self._validate_repo(owner, repo)
+
+        encoded_owner = urllib.parse.quote(owner, safe="")
+        encoded_repo = urllib.parse.quote(repo, safe="")
+        sha = ref or self._default_branch(owner, repo)
+        endpoint = f"/repos/{encoded_owner}/{encoded_repo}/git/trees/{urllib.parse.quote(sha, safe='')}"
+        result = self._request(endpoint, {"recursive": "1"})
+
+        items = [
+            {"path": item["path"], "size": item.get("size") or 0}
+            for item in result.get("tree", [])
+            if item.get("type") == "blob"
+        ]
+        return {"items": items, "truncated": bool(result.get("truncated"))}
+
 
 def get_github_connector(user_id: str | None = None) -> GitHubConnector:
     """Uses this user's own token (from connector_credentials) if they've set

@@ -58,6 +58,14 @@ logger = logging.getLogger(__name__)
 _URL_RE = re.compile(r'https?://[^\s<>\]\)"]+')
 
 
+def is_supported_extension(filename: str) -> bool:
+    """Whether `filename`'s extension is one ingest_bytes() will accept.
+    Lets router.py pre-filter bulk-ingest candidates (e.g. a whole GitHub
+    repo tree or Drive listing) down to files that won't just immediately
+    400, without importing the RAG upload module directly itself."""
+    return os.path.splitext(filename)[1].lower() in ALLOWED_EXTENSIONS
+
+
 def _connector_doc_filename(prefix: str, display_name: str, item_id: str) -> str:
     """Builds the filename a conversation/space-style connector document is
     ingested under: "<prefix> - <display name> (<short id>).txt". Used by

@@ -7,8 +7,8 @@ from app.connectors.clients.microsoft_graph import MicrosoftGraphClient
 class TeamsConnector:
     """Read-only Microsoft Teams operations using Microsoft Graph."""
 
-    def __init__(self) -> None:
-        self.graph = MicrosoftGraphClient()
+    def __init__(self, user_id: str) -> None:
+        self.graph = MicrosoftGraphClient(user_id, "teams")
 
     @staticmethod
     def _segment(value: str) -> str:
@@ -17,9 +17,12 @@ class TeamsConnector:
         return quote(value, safe="")
 
     def list_teams(self) -> list[dict[str, Any]]:
-        # Requires application permission appropriate to the tenant.
+        # Delegated access (Team.ReadBasic.All) only sees teams the signed-in
+        # user has joined - "/me/joinedTeams", not a tenant-wide "/teams"
+        # listing (which needs app-only/directory-level permissions this
+        # connector no longer has - see microsoft_graph.py).
         return self.graph.get_all(
-            "/teams",
+            "/me/joinedTeams",
             params={"$select": "id,displayName,description"},
         )
 

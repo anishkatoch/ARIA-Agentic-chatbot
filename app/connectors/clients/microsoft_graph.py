@@ -1,14 +1,38 @@
+"""Shared Microsoft Graph client for SharePoint and Teams - delegated,
+per-user access via the same Microsoft OAuth grant Outlook uses (see
+outlook.py's SCOPES, which include Sites.Read.All/Team.ReadBasic.All/
+Channel.ReadBasic.All/ChannelMessage.Read.All alongside Mail.Read/Chat.Read).
+
+Deliberately NOT app-only/client-credentials (no tenant-wide access with no
+per-user login) - that would mean SharePoint/Teams access isn't tied to any
+particular signed-in user and can't be connected/disconnected per user, the
+same reasoning outlook_chat.py documents for sharing Outlook's grant instead
+of running its own. router.py's outlook_callback mirrors the token it
+receives into "sharepoint" and "teams" token_store rows right after saving
+"outlook" and "outlook_chat", and /connectors/sharepoint/auth/login and
+/connectors/teams/auth/login just return the same authorization URL
+Outlook's login does.
+"""
 import os
 from typing import Any
+
 import httpx
-import msal
+
+from app.connectors import token_store
+from app.connectors.clients.oauth2_token_client import OAuth2TokenClient
 
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
-GRAPH_SCOPE = ["https://graph.microsoft.com/.default"]
+
+_TENANT = os.getenv("MICROSOFT_TENANT_ID") or "common"
+TOKEN_ENDPOINT = f"https://login.microsoftonline.com/{_TENANT}/oauth2/v2.0/token"
 
 
 class MicrosoftGraphError(RuntimeError):
     """Raised when Microsoft Graph authentication or a request fails."""
+
+    def __init__(self, message: str, status_code: int = 502):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _extract_graph_error_message(response: httpx.Response, max_len: int = 300) -> str:
@@ -28,51 +52,65 @@ def _extract_graph_error_message(response: httpx.Response, max_len: int = 300) -
 
 
 class MicrosoftGraphClient:
-    """Shared Microsoft Graph client for SharePoint and Teams."""
+    """One instance per (user_id, provider) - provider is "sharepoint" or
+    "teams", its own token_store row (mirrored from "outlook" at connect
+    time, refreshed independently thereafter, same pattern as
+    outlook_chat.py's OutlookChatConnector)."""
 
-    def __init__(self) -> None:
-        self.tenant_id = os.getenv("MICROSOFT_TENANT_ID", "").strip()
+    def __init__(self, user_id: str, provider: str) -> None:
+        if not user_id:
+            raise MicrosoftGraphError("Authentication required", status_code=401)
+        self.user_id = user_id
+        self.provider = provider
         self.client_id = os.getenv("MICROSOFT_CLIENT_ID", "").strip()
         self.client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "").strip()
-        self._app: msal.ConfidentialClientApplication | None = None
-
-    def _validate_credentials(self) -> None:
-        missing = [
-            name
-            for name, value in (
-                ("MICROSOFT_TENANT_ID", self.tenant_id),
-                ("MICROSOFT_CLIENT_ID", self.client_id),
-                ("MICROSOFT_CLIENT_SECRET", self.client_secret),
-            )
-            if not value
-        ]
-        if missing:
+        if not self.client_id or not self.client_secret:
             raise MicrosoftGraphError(
-                f"Missing required Microsoft Graph environment variables: {', '.join(missing)}"
+                "MICROSOFT_CLIENT_ID or MICROSOFT_CLIENT_SECRET not configured in .env", status_code=500,
             )
-
-    def _get_app(self) -> msal.ConfidentialClientApplication:
-        if self._app is None:
-            self._validate_credentials()
-            authority = f"https://login.microsoftonline.com/{self.tenant_id}"
-            self._app = msal.ConfidentialClientApplication(
-                client_id=self.client_id,
-                authority=authority,
-                client_credential=self.client_secret,
-            )
-        return self._app
+        self._oauth = OAuth2TokenClient(user_id, provider, self.client_id, self.client_secret, TOKEN_ENDPOINT)
 
     def get_token(self) -> str:
-        app = self._get_app()
-        result = app.acquire_token_silent(GRAPH_SCOPE, account=None)
-        if not result:
-            result = app.acquire_token_for_client(scopes=GRAPH_SCOPE)
+        row = self._oauth.stored_token()
+        if row is None:
+            raise MicrosoftGraphError(
+                f"{self.provider.capitalize()} is not connected. Connect Outlook (they share one "
+                f"Microsoft sign-in), or visit /connectors/{self.provider}/auth/login directly.",
+                status_code=401,
+            )
 
-        if not result or "access_token" not in result:
-            err_desc = result.get("error_description") or result.get("error") if result else "Unknown error"
-            raise MicrosoftGraphError(f"Failed to acquire Microsoft Graph token: {err_desc}")
+        access_token = row["access_token"]
+        refresh_token = row["refresh_token"]
 
-        return result["access_token"]
+        if self._oauth.is_expiring(row["expires_at"]):
+            if not refresh_token:
+                raise MicrosoftGraphError(
+                    f"{self.provider.capitalize()} token expired and no refresh token available. "
+                    "Reconnect Outlook.",
+                    status_code=401,
+                )
+            access_token = self._refresh_access_token(refresh_token)
+
+        return access_token
+
+    def _refresh_access_token(self, refresh_token: str) -> str:
+        form = {
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        }
+        try:
+            new_data = self._oauth.post_token_endpoint(form)
+        except Exception as exc:
+            raise MicrosoftGraphError(
+                f"Failed to refresh {self.provider} token: {exc}. Please reconnect.", status_code=401,
+            )
+
+        new_access = new_data["access_token"]
+        new_refresh = new_data.get("refresh_token", refresh_token)
+        self._oauth.save(new_access, new_refresh, self._oauth.expires_at_from(new_data))
+        return new_access
 
     def request(
         self,
@@ -91,17 +129,19 @@ class MicrosoftGraphClient:
             with httpx.Client(timeout=25.0) as client:
                 response = client.get(url, headers=headers, params=params)
                 if response.status_code == 404:
-                    raise MicrosoftGraphError(f"Resource not found: {endpoint}")
+                    raise MicrosoftGraphError(f"Resource not found: {endpoint}", status_code=404)
                 if response.status_code == 403:
                     detail = _extract_graph_error_message(response)
                     suffix = f": {detail}" if detail else ""
-                    raise MicrosoftGraphError(f"Access denied or insufficient Microsoft Graph permissions{suffix}")
+                    raise MicrosoftGraphError(
+                        f"Access denied or insufficient Microsoft Graph permissions{suffix}", status_code=403,
+                    )
                 if response.status_code == 401:
                     detail = _extract_graph_error_message(response)
                     suffix = f" ({detail})" if detail else ""
-                    raise MicrosoftGraphError(f"Microsoft Graph authentication failed{suffix}")
+                    raise MicrosoftGraphError(f"Microsoft Graph authentication failed{suffix}", status_code=401)
                 if response.status_code == 429:
-                    raise MicrosoftGraphError("Microsoft Graph API rate limit exceeded")
+                    raise MicrosoftGraphError("Microsoft Graph API rate limit exceeded", status_code=429)
                 if response.is_error:
                     raise MicrosoftGraphError(
                         f"Microsoft Graph API returned HTTP {response.status_code}: {response.text}"

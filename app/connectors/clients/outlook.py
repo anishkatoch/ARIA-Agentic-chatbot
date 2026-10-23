@@ -1,20 +1,20 @@
 """Read-only Outlook Mail connector using delegated user OAuth 2.0 against
 Microsoft Graph - the Microsoft counterpart to gmail.py.
 
-Deliberately separate from sharepoint.py/teams.py, which authenticate as the
-*app itself* (client-credentials / app-only Graph access via
-MICROSOFT_TENANT_ID+CLIENT_ID+CLIENT_SECRET, no per-user login). Outlook Mail
-needs delegated, per-user access instead (read THIS user's own mailbox), so
-it runs its own authorization-code + refresh-token flow, same shape as
-gmail.py/google_drive.py, reusing the same MICROSOFT_CLIENT_ID/CLIENT_SECRET
+Runs its own authorization-code + refresh-token flow, same shape as
+gmail.py/google_drive.py, against the MICROSOFT_CLIENT_ID/CLIENT_SECRET
 Azure AD app registration (which must also have a "Web" platform redirect
-URI added for OUTLOOK_REDIRECT_URI, and Mail.Read/Chat.Read/offline_access
-delegated permissions granted).
+URI added for OUTLOOK_REDIRECT_URI, and this module's SCOPES granted as
+delegated permissions - admin consent is typically required).
 
-Outlook Chat (app/connectors/clients/outlook_chat.py) shares this exact
-OAuth grant, the same way Google Chat shares Gmail's - see this module's
-SCOPES and router.py's outlook_callback, which mirrors the resulting token
-into an "outlook_chat" row too.
+Outlook Chat, SharePoint and Teams (app/connectors/clients/outlook_chat.py,
+sharepoint.py, teams.py, via microsoft_graph.py) all share this exact OAuth
+grant, the same way Google Chat shares Gmail's - see this module's SCOPES
+and router.py's outlook_callback, which mirrors the resulting token into
+"outlook_chat", "sharepoint" and "teams" rows too. From the user's
+perspective all four are one Microsoft sign-in: connecting or disconnecting
+any one of them connects/disconnects all four (see router.py's
+_LINKED_OAUTH_PROVIDERS).
 """
 import json
 import os
@@ -42,6 +42,14 @@ SCOPES = [
     "Mail.Read",
     # Outlook Chat shares this grant - see outlook_chat.py.
     "Chat.Read",
+    # SharePoint and Teams also share this grant (delegated, per-user access
+    # instead of a separate app-only client-credentials flow) - see
+    # microsoft_graph.py, sharepoint.py and teams.py. Requires admin consent
+    # in most tenants, same as the scopes above.
+    "Sites.Read.All",
+    "Team.ReadBasic.All",
+    "Channel.ReadBasic.All",
+    "ChannelMessage.Read.All",
 ]
 
 PROVIDER = "outlook"

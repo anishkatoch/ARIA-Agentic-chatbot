@@ -1683,13 +1683,41 @@ async function browseGithubContents(owner, repo, ref, path) {
            </div>`
       ).join('') || '<div class="connector-browse-note">Empty folder</div>';
 
-      return `<div class="connector-breadcrumb">${crumbs.join(' / ')}</div>` + rows;
+      const bulkBar = `
+        <div class="gmail-bulk-controls">
+          <button class="connector-action-btn secondary" onclick="bulkIngestGithubRepo('${escAttr(owner)}', '${escAttr(repo)}', '${escAttr(ref)}')">Add entire repo (${escHtml(owner)}/${escHtml(repo)})</button>
+        </div>`;
+
+      return `<div class="connector-breadcrumb">${crumbs.join(' / ')}</div>` + bulkBar + rows;
     },
   );
 }
 
 async function ingestGithubFile(owner, repo, path, ref, name) {
   await runConnectorIngest('github', { owner, repo, path, ref: ref || null }, name);
+}
+
+async function bulkIngestGithubRepo(owner, repo, ref) {
+  closeConnectorModal();
+  const label = `all files in ${owner}/${repo}`;
+  const card = new ProgressCard(`Adding ${label}`);
+  try {
+    const res = await fetch('/connectors/github/ingest/bulk', {
+      method: 'POST',
+      headers: connectorHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ mode: 'repo', owner, repo, ref: ref || null, session_id: state.sessionId || undefined }),
+    });
+    if (await handleAuthError(res)) return;
+    if (handleConnectorsLockError(res)) return;
+    if (!res.ok) {
+      const data = await safeJson(res);
+      throw new Error(data?.detail || `Server error ${res.status}`);
+    }
+    await readSSEStream(res, (ev) => handleProgressEvent(card, ev));
+  } catch (e) {
+    card.fail(e.message);
+    toast(e.message, 'error');
+  }
 }
 
 /* ── Gmail browser ────────────────────────────────────────────── */
@@ -2416,12 +2444,20 @@ async function loadGoogleDriveFolder(pageToken = '', append = false) {
       ? `<button class="connector-load-more" onclick="loadGoogleDriveFolder('${escAttr(_gdriveNextToken)}', true)">Load more</button>`
       : '';
 
+    const isRoot = current.id === 'root';
+    const bulkBar = `
+      <div class="gmail-bulk-controls">
+        ${isRoot ? '' : `<button class="connector-action-btn" onclick="bulkIngestGoogleDrive('folder', '${escAttr(current.id)}', '${escAttr(current.name)}')">Add this folder (${escHtml(current.name)})</button>
+        <span class="gmail-bulk-sep">or</span>`}
+        <button class="connector-action-btn secondary" onclick="bulkIngestGoogleDrive('all', null, 'My Drive')">Add all files in Drive</button>
+      </div>`;
+
     if (append) {
       const prevBtn = el.querySelector('.connector-load-more');
       if (prevBtn) prevBtn.remove();
       el.insertAdjacentHTML('beforeend', rows + loadMore);
     } else {
-      el.innerHTML = crumbs + ((rows + loadMore) || '<div class="connector-browse-note">Empty folder</div>');
+      el.innerHTML = crumbs + bulkBar + ((rows + loadMore) || '<div class="connector-browse-note">Empty folder</div>');
     }
   } catch (e) {
     el.innerHTML = `<div class="connector-browse-note">${escHtml(e.message)}</div>`;
@@ -2430,6 +2466,28 @@ async function loadGoogleDriveFolder(pageToken = '', append = false) {
 
 async function ingestGoogleDriveFile(fileId, name) {
   await runConnectorIngest('google_drive', { file_id: fileId }, name);
+}
+
+async function bulkIngestGoogleDrive(mode, folderId, label) {
+  closeConnectorModal();
+  const card = new ProgressCard(`Adding ${mode === 'all' ? 'all files in Drive' : `folder "${label}"`}`);
+  try {
+    const res = await fetch('/connectors/google-drive/ingest/bulk', {
+      method: 'POST',
+      headers: connectorHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ mode, folder_id: folderId || undefined, session_id: state.sessionId || undefined }),
+    });
+    if (await handleAuthError(res)) return;
+    if (handleConnectorsLockError(res)) return;
+    if (!res.ok) {
+      const data = await safeJson(res);
+      throw new Error(data?.detail || `Server error ${res.status}`);
+    }
+    await readSSEStream(res, (ev) => handleProgressEvent(card, ev));
+  } catch (e) {
+    card.fail(e.message);
+    toast(e.message, 'error');
+  }
 }
 
 /* ── SharePoint browser ───────────────────────────────────────── */

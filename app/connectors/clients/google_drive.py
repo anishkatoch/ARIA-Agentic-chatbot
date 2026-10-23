@@ -240,6 +240,58 @@ class GoogleDriveConnector:
             "next_page_token": raw.get("nextPageToken"),
         }
 
+    def list_file_ids_bulk(self, folder_id: str | None = None, limit: int = 500) -> list[dict]:
+        """Returns up to `limit` non-folder file records ({id, name,
+        mimeType, size}) for bulk ingest. folder_id=None lists every file
+        across this user's My Drive + shared drives; a given folder_id
+        instead walks that folder and all of its subfolders breadth-first,
+        collecting files along the way."""
+        fields = "nextPageToken, files(id, name, mimeType, size)"
+
+        def _list_children(parent_id: str | None, remaining: int) -> list[dict]:
+            children: list[dict] = []
+            page_token = ""
+            q = f"'{parent_id}' in parents and trashed = false" if parent_id else "trashed = false"
+            while True:
+                params = {
+                    "pageSize": min(remaining, 1000) if remaining else 1000,
+                    "fields": fields,
+                    "supportsAllDrives": "true",
+                    "includeItemsFromAllDrives": "true",
+                    "q": q,
+                }
+                if page_token:
+                    params["pageToken"] = page_token
+                raw = self._api_request("/files", params)
+                children.extend(raw.get("files", []))
+                page_token = raw.get("nextPageToken")
+                if not page_token or len(children) >= remaining:
+                    break
+            return children
+
+        results: list[dict] = []
+
+        if folder_id:
+            queue = [folder_id]
+            while queue and len(results) < limit:
+                current = queue.pop(0)
+                for f in _list_children(current, limit - len(results)):
+                    if f.get("mimeType") == "application/vnd.google-apps.folder":
+                        queue.append(f["id"])
+                    else:
+                        results.append(f)
+                        if len(results) >= limit:
+                            break
+        else:
+            for f in _list_children(None, limit):
+                if f.get("mimeType") == "application/vnd.google-apps.folder":
+                    continue
+                results.append(f)
+                if len(results) >= limit:
+                    break
+
+        return results[:limit]
+
     def get_file_metadata(self, file_id: str) -> dict:
         params = {
             "fields": "*",

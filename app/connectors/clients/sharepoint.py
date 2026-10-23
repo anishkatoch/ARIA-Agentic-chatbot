@@ -10,8 +10,8 @@ from app.connectors.clients.microsoft_graph import (
 class SharePointConnector:
     """Read-only SharePoint operations using Microsoft Graph."""
 
-    def __init__(self) -> None:
-        self.graph = MicrosoftGraphClient()
+    def __init__(self, user_id: str) -> None:
+        self.graph = MicrosoftGraphClient(user_id, "sharepoint")
 
     @staticmethod
     def _segment(value: str) -> str:
