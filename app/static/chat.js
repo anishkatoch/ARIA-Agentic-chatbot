@@ -892,7 +892,7 @@ function setupFileInput() {
 const MAX_FILES      = 5;
 const MAX_MB         = 15;
 const MAX_SESSION_MB = 50;
-const ALLOWED        = ['.pdf', '.doc', '.docx', '.txt', '.md', '.xlsx', '.xls', '.csv'];
+const ALLOWED        = ['.pdf', '.doc', '.docx', '.ppt', '.pptx', '.txt', '.md', '.xlsx', '.xls', '.csv'];
 
 function totalSizeBytes() {
   return state.files.reduce((sum, f) => sum + f.size, 0);
@@ -1003,7 +1003,11 @@ function collectHeaders() {
 
 /* ── Progress Card ───────────────────────────────────────────── */
 class ProgressCard {
-  constructor(title) {
+  // onCancel (optional): shows a small "x" next to the title that the user
+  // can click any time before the card finishes - lets them stop an
+  // in-progress embedding instead of having to wait it out (or close the
+  // tab, the only way to abort it before this existed).
+  constructor(title, onCancel) {
     this._steps = {};
     const div = document.createElement('div');
     div.className = 'message bot';
@@ -1011,7 +1015,12 @@ class ProgressCard {
       <div class="bot-avatar">AR</div>
       <div>
         <div class="bubble progress-card">
-          <div class="progress-title">${escHtml(title)}</div>
+          <div class="progress-title-row">
+            <div class="progress-title">${escHtml(title)}</div>
+            ${onCancel ? `<button class="progress-cancel-btn" title="Cancel" aria-label="Cancel processing">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>` : ''}
+          </div>
           <div class="progress-steps"></div>
           <div class="progress-total hidden"></div>
         </div>
@@ -1022,6 +1031,17 @@ class ProgressCard {
     this._titleEl  = div.querySelector('.progress-title');
     this._stepsEl  = div.querySelector('.progress-steps');
     this._totalEl  = div.querySelector('.progress-total');
+    this._cancelBtn = div.querySelector('.progress-cancel-btn');
+    if (this._cancelBtn) {
+      this._cancelBtn.addEventListener('click', () => {
+        this._hideCancel();
+        onCancel();
+      });
+    }
+  }
+
+  _hideCancel() {
+    if (this._cancelBtn) this._cancelBtn.remove();
   }
 
   setTitle(title) {
@@ -1070,18 +1090,41 @@ class ProgressCard {
     scrollToBottom();
   }
 
+  // clearInterval alone only stops the elapsed-time text from updating - the
+  // spinning-wheel icon is a CSS animation keyed off the "running" class, so
+  // a step left mid-flight when the stream ends early (dropped connection,
+  // cancel) would otherwise spin forever even though the card below it
+  // already says Failed/Cancelled. Called from every terminal state so no
+  // row is left stuck.
+  _haltRunningSteps() {
+    Object.values(this._steps).forEach(s => {
+      clearInterval(s.interval);
+      if (s.row.classList.contains('running')) s.row.className = 'progress-step stopped';
+    });
+  }
+
   complete(totalElapsed, message = 'Document processed') {
-    Object.values(this._steps).forEach(s => clearInterval(s.interval));
+    this._haltRunningSteps();
+    this._hideCancel();
     this._totalEl.classList.remove('hidden');
     this._totalEl.textContent = `${message} - ${totalElapsed.toFixed(2)}s`;
     scrollToBottom();
   }
 
   fail(message) {
-    Object.values(this._steps).forEach(s => clearInterval(s.interval));
+    this._haltRunningSteps();
+    this._hideCancel();
     this._totalEl.classList.remove('hidden');
     this._totalEl.classList.add('error');
     this._totalEl.textContent = `Failed: ${message}`;
+    scrollToBottom();
+  }
+
+  cancelled() {
+    this._haltRunningSteps();
+    this._hideCancel();
+    this._totalEl.classList.remove('hidden');
+    this._totalEl.textContent = 'Cancelled';
     scrollToBottom();
   }
 }
@@ -1244,7 +1287,8 @@ async function processSource() {
 
 async function processFiles() {
   setProcessing(true);
-  const card = new ProgressCard(`Processing ${state.files.length} file(s)`);
+  const controller = new AbortController();
+  const card = new ProgressCard(`Processing ${state.files.length} file(s)`, () => controller.abort());
   const form = new FormData();
   state.files.forEach(f => form.append('files', f));
 
@@ -1252,6 +1296,7 @@ async function processFiles() {
     const res = await fetch('/upload/files', {
       method: 'POST',
       body: form,
+      signal: controller.signal,
       headers: authHeaders({
         'X-Client-Token': state.clientToken || 'anonymous',
         ...(state.sessionId ? { 'X-Session-Id': state.sessionId } : {}),
@@ -1264,8 +1309,13 @@ async function processFiles() {
     }
     await readSSEStream(res, (ev) => handleProgressEvent(card, ev));
   } catch (err) {
-    card.fail(err.message);
-    toast(err.message, 'error');
+    if (err.name === 'AbortError') {
+      card.cancelled();
+      toast('Upload cancelled', 'info');
+    } else {
+      card.fail(err.message);
+      toast(err.message, 'error');
+    }
   } finally {
     setProcessing(false);
   }
@@ -1273,10 +1323,12 @@ async function processFiles() {
 
 async function processUrl(url) {
   setProcessing(true);
-  const card = new ProgressCard('Processing URL');
+  const controller = new AbortController();
+  const card = new ProgressCard('Processing URL', () => controller.abort());
   try {
     const res = await fetch('/upload/url', {
       method: 'POST',
+      signal: controller.signal,
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ url, session_id: state.sessionId || undefined }),
     });
@@ -1287,8 +1339,13 @@ async function processUrl(url) {
     }
     await readSSEStream(res, (ev) => handleProgressEvent(card, ev));
   } catch (err) {
-    card.fail(err.message);
-    toast(err.message, 'error');
+    if (err.name === 'AbortError') {
+      card.cancelled();
+      toast('Upload cancelled', 'info');
+    } else {
+      card.fail(err.message);
+      toast(err.message, 'error');
+    }
   } finally {
     setProcessing(false);
   }
@@ -2620,7 +2677,10 @@ function handleKey(e) {
 async function sendMessage() {
   const input = document.getElementById('chat-input');
   const question = input.value.trim();
-  if (!question || !state.isReady || state.isProcessing) return;
+  // Chatting while a file is still being processed is allowed - it just
+  // answers from whatever's already indexed so far (or the existing
+  // session/sample data), not from the chunks still being embedded.
+  if (!question || !state.isReady) return;
 
   input.value = '';
   autoResize(input);
@@ -2760,6 +2820,31 @@ function copyText(btn, text) {
 }
 
 /* ── Reset ───────────────────────────────────────────────────── */
+// Guards resetSession() behind an explicit confirmation whenever there's
+// anything this chat is currently using - personal uploads AND/OR attached
+// knowledge bases - so a stray click on "New Session" never silently drops
+// them. Nothing is deleted either way: personal documents stay in the
+// database under their old session id, and a detached knowledge base can
+// always be re-attached - this is just about not doing either without the
+// user clearly meaning to.
+function confirmNewSession() {
+  const hasPersonalDocs = state.files.length > 0 || state.isReady;
+  const hasAttachedKbs  = state.attachedKnowledgeBaseIds.size > 0;
+  if (!hasPersonalDocs && !hasAttachedKbs) {
+    resetSession();
+    return;
+  }
+  const what = [
+    hasPersonalDocs ? 'your uploaded documents' : null,
+    hasAttachedKbs ? `${state.attachedKnowledgeBaseIds.size} attached knowledge base(s)` : null,
+  ].filter(Boolean).join(' and ');
+  const confirmed = confirm(
+    `Start a new session? This chat will stop using ${what} - nothing is deleted, ` +
+    `you can re-attach a knowledge base or upload again later, but you'll need to do that yourself.`
+  );
+  if (confirmed) resetSession();
+}
+
 function resetSession() {
   state.isReady    = false;
   state.files      = [];

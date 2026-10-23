@@ -431,6 +431,16 @@ async function loadKnowledgeBases() {
   }
 }
 
+/* Replaces a single KB in local state from a mutation response and
+ * re-renders - avoids a full /admin/knowledge-bases re-fetch + re-render
+ * for what is a single-row update. */
+function _patchKbInState(data) {
+  const idx = adminState.knowledgeBases.findIndex(k => k.id === data.id);
+  if (idx === -1) return;
+  adminState.knowledgeBases[idx] = data;
+  renderKbGrid();
+}
+
 async function renameKb(kbId, currentName) {
   const name = prompt('Rename knowledge base', currentName);
   if (name === null) return;
@@ -445,7 +455,7 @@ async function renameKb(kbId, currentName) {
     const data = await res.json();
     if (handleAuthError(res)) return;
     if (!res.ok) throw new Error(data.detail || 'Failed to rename');
-    await loadKnowledgeBases();
+    _patchKbInState(data);
   } catch (e) {
     alert(e.message);
   }
@@ -565,7 +575,7 @@ async function saveKbAccess() {
     if (!res.ok) throw new Error(data.detail || 'Failed to update access');
     adminState.knownRoles = null;
     closeKbAccessModal();
-    await loadKnowledgeBases();
+    _patchKbInState(data);
   } catch (e) {
     errEl.textContent = e.message;
     errEl.classList.remove('hidden');
@@ -573,18 +583,28 @@ async function saveKbAccess() {
 }
 
 async function toggleKbStatus(kbId, isActive) {
+  // Optimistic update: flip the local status and re-render the stat card
+  // immediately so it doesn't wait on the PATCH round-trip + full reload.
+  const kb = adminState.knowledgeBases.find(k => k.id === kbId);
+  const previousStatus = kb ? kb.status : null;
+  if (kb) {
+    kb.status = isActive ? 'active' : 'inactive';
+    renderKbGrid();
+  }
   try {
     const res = await fetch(`/admin/knowledge-bases/${kbId}`, {
       method: 'PATCH',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ status: isActive ? 'active' : 'inactive' }),
     });
+    const data = await res.json().catch(() => null);
     if (handleAuthError(res)) return;
     if (!res.ok) throw new Error('Failed to update status');
-    await loadKnowledgeBases();
+    if (data) _patchKbInState(data);
   } catch (e) {
+    if (kb) kb.status = previousStatus;
+    renderKbGrid();
     alert(e.message);
-    await loadKnowledgeBases();
   }
 }
 
@@ -594,7 +614,8 @@ async function deleteKb(kbId, name) {
     const res = await fetch(`/admin/knowledge-bases/${kbId}`, { method: 'DELETE', headers: authHeaders() });
     if (handleAuthError(res)) return;
     if (!res.ok) throw new Error('Failed to delete');
-    await loadKnowledgeBases();
+    adminState.knowledgeBases = adminState.knowledgeBases.filter(k => k.id !== kbId);
+    renderKbGrid();
   } catch (e) {
     alert(e.message);
   }

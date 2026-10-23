@@ -189,6 +189,37 @@ class TestDoclingFallback:
         assert not any(os.path.exists(f) and os.path.getsize(f) == len(b"%PDF-1.4 fake") for f in leaked)
 
 
+# ── PPT/PPTX goes straight to Docling, same as xlsx/xls/csv ─────────────────
+# LiteParse is a PDF/DOCX layout parser with no slide-deck support - it
+# would fail on every pptx, so parse_file skips straight to Docling (native
+# pptx backend) instead of paying for a doomed first attempt.
+
+class TestPptRoutesStraightToDocling:
+    async def test_pptx_never_calls_liteparse(self):
+        import app.services.ingestion as ingestion
+        with patch.object(ingestion, "_parse_with_liteparse") as mock_lite, \
+             patch.object(ingestion, "_parse_with_docling",
+                          return_value=("slide text", [{"page_number": 1, "start": 0, "end": 10, "confidence": None}])):
+            text, spans = await ingestion.parse_file(b"fake pptx bytes", "deck.pptx")
+        assert text == "slide text"
+        mock_lite.assert_not_called()
+
+    async def test_ppt_never_calls_liteparse(self):
+        import app.services.ingestion as ingestion
+        with patch.object(ingestion, "_parse_with_liteparse") as mock_lite, \
+             patch.object(ingestion, "_parse_with_docling",
+                          return_value=("slide text", [{"page_number": 1, "start": 0, "end": 10, "confidence": None}])):
+            await ingestion.parse_file(b"fake ppt bytes", "deck.ppt")
+        mock_lite.assert_not_called()
+
+    async def test_pptx_docling_failure_raises_with_filename(self):
+        import app.services.ingestion as ingestion
+        with patch.object(ingestion, "_parse_with_docling", side_effect=RuntimeError("docling boom")):
+            with pytest.raises(RuntimeError) as exc_info:
+                await ingestion.parse_file(b"fake pptx bytes", "deck.pptx")
+        assert "deck.pptx" in str(exc_info.value)
+
+
 # ── _docling_page_confidence helper ───────────────────────────────────────────
 
 class TestDoclingPageConfidence:

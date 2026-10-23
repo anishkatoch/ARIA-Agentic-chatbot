@@ -135,6 +135,40 @@ class TestExtensionValidation:
         if res.status_code == 400:
             assert "Unsupported" not in res.json().get("detail", "")
 
+    def test_pptx_accepted(self):
+        """PPTX extension must pass the extension check - previously
+        rejected outright even though the parser (Docling) already
+        supports it natively."""
+        client = _make_client()
+        from unittest.mock import AsyncMock as AM
+        mock_parse = AM(return_value=("slide text", [{"page_number": 1, "start": 0, "end": 10, "confidence": None}]))
+        mock_store = MagicMock()
+        mock_store.add_texts = MagicMock()
+        with patch("app.routers.upload.parse_file", mock_parse), \
+             patch("app.routers.upload.get_vector_store", return_value=mock_store), \
+             patch("app.services.dedup._get_db_session", return_value=None):
+            res = client.post("/upload/files",
+                              files=[("files", ("deck.pptx", b"fake-pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"))],
+                              headers={"X-Client-Token": "t1"})
+        if res.status_code == 400:
+            assert "Unsupported" not in res.json().get("detail", "")
+
+    def test_ppt_accepted(self):
+        """Legacy .ppt extension must also pass the extension check."""
+        client = _make_client()
+        from unittest.mock import AsyncMock as AM
+        mock_parse = AM(return_value=("slide text", [{"page_number": 1, "start": 0, "end": 10, "confidence": None}]))
+        mock_store = MagicMock()
+        mock_store.add_texts = MagicMock()
+        with patch("app.routers.upload.parse_file", mock_parse), \
+             patch("app.routers.upload.get_vector_store", return_value=mock_store), \
+             patch("app.services.dedup._get_db_session", return_value=None):
+            res = client.post("/upload/files",
+                              files=[("files", ("deck.ppt", b"fake-ppt", "application/vnd.ms-powerpoint"))],
+                              headers={"X-Client-Token": "t1"})
+        if res.status_code == 400:
+            assert "Unsupported" not in res.json().get("detail", "")
+
 
 # ── Per-file size validation ──────────────────────────────────────────────────
 

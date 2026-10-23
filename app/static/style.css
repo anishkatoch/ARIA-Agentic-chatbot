@@ -931,6 +931,18 @@ html.dark .thinking-toggle-label input:checked + .thinking-toggle-slider { backg
 }
 .reset-btn:hover { border-color: var(--error); color: var(--error); background: rgba(220,38,38,0.04); }
 
+.header-new-session-btn {
+  background: none; border: 1px solid var(--border); color: var(--text-muted);
+  padding: 7px 12px; border-radius: var(--radius-sm); cursor: pointer;
+  font-family: inherit; font-size: 13px;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  transition: all var(--transition); white-space: nowrap;
+}
+.header-new-session-btn:hover { border-color: var(--accent); color: var(--accent); background: rgba(0,122,61,0.04); }
+@media (max-width: 640px) {
+  .header-new-session-btn span { display: none; }
+}
+
 .connectors-toggle-btn {
   background: none; border: 1px solid var(--border-2); color: var(--text-muted);
   padding: 10px; border-radius: var(--radius-sm); cursor: pointer;
@@ -1271,10 +1283,18 @@ html.dark .thinking-toggle-label input:checked + .thinking-toggle-slider { backg
 
 /* ── Progress card ───────────────────────────────────────────── */
 .progress-card { padding: 16px 20px; min-width: 320px; max-width: 480px; }
+.progress-title-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
 .progress-title {
   font-size: 12.5px; font-weight: 700; color: var(--text-muted);
-  margin-bottom: 14px; letter-spacing: 0.08em; text-transform: uppercase;
+  letter-spacing: 0.08em; text-transform: uppercase;
 }
+.progress-cancel-btn {
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 18px; height: 18px; border: none; border-radius: 50%;
+  background: rgba(220,38,38,0.1); color: var(--error);
+  cursor: pointer; padding: 0;
+}
+.progress-cancel-btn:hover { background: rgba(220,38,38,0.2); }
 .progress-steps { display: flex; flex-direction: column; gap: 10px; }
 .progress-step { display: grid; grid-template-columns: 18px 1fr auto; align-items: center; gap: 10px; font-size: 14.5px; }
 .ps-icon { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; }
@@ -1288,6 +1308,8 @@ html.dark .thinking-toggle-label input:checked + .thinking-toggle-slider { backg
 .progress-step.error .ps-label { color: var(--error); }
 .progress-step.skipped .ps-icon::before { content: '⚠'; color: var(--warning); font-weight: 700; font-size: 14.5px; }
 .progress-step.skipped .ps-label { color: var(--warning); }
+.progress-step.stopped .ps-icon::before { content: '–'; color: var(--text-muted); font-weight: 700; }
+.progress-step.stopped .ps-label { color: var(--text-muted); }
 .progress-total { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 14.5px; font-weight: 600; color: var(--success); display: flex; align-items: center; gap: 8px; }
 .progress-total.error { color: var(--error); }
 

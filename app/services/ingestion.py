@@ -169,11 +169,12 @@ async def parse_file(content: bytes, filename: str) -> tuple[str, list[dict]]:
 
     tmp_path = await asyncio.to_thread(_write_tmp)
     try:
-        if ext in (".xlsx", ".xls", ".csv"):
+        if ext in (".xlsx", ".xls", ".csv", ".ppt", ".pptx"):
             # LiteParse is a PDF/DOCX page-layout parser with no spreadsheet
-            # support - it would fail on every single one of these, so go
-            # straight to Docling (which has native xlsx/xls/csv backends)
-            # instead of paying for a doomed first attempt.
+            # or slide-deck support - it would fail on every single one of
+            # these, so go straight to Docling (which has native xlsx/xls/
+            # csv AND ppt/pptx backends) instead of paying for a doomed
+            # first attempt.
             try:
                 full_text, page_spans = await asyncio.to_thread(_parse_with_docling, tmp_path)
             except Exception as docling_error:

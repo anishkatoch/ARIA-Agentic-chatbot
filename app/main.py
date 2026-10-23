@@ -192,7 +192,7 @@ async def auth_middleware(request: Request, call_next):
         token = auth_header[7:] if auth_header.startswith("Bearer ") else None
         if not token:
             return JSONResponse({"detail": "Admin authentication required"}, status_code=401)
-        user = auth_service.verify_token(token)
+        user = await asyncio.to_thread(auth_service.verify_token, token)
         if not user:
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
         if user.get("role") != "admin":
@@ -205,7 +205,7 @@ async def auth_middleware(request: Request, call_next):
         token = auth_header[7:] if auth_header.startswith("Bearer ") else None
         if not token:
             return JSONResponse({"detail": "Authentication required"}, status_code=401)
-        user = auth_service.verify_token(token)
+        user = await asyncio.to_thread(auth_service.verify_token, token)
         if not user:
             return JSONResponse({"detail": "Invalid or expired token"}, status_code=401)
         request.state.user = user

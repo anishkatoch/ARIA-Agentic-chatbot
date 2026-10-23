@@ -83,11 +83,18 @@ async def list_knowledge_bases(request: Request):
     db = _db()
     try:
         kbs = db.query(KnowledgeBase).order_by(KnowledgeBase.created_at.desc()).all()
-        out = []
-        for kb in kbs:
-            total, pending = _counts(db, kb.id)
-            out.append(_kb_to_dict(kb, total, pending))
-        return out
+        from sqlalchemy import func, case
+        rows = (
+            db.query(
+                KnowledgeBaseDocument.knowledge_base_id,
+                func.count(KnowledgeBaseDocument.id),
+                func.sum(case((KnowledgeBaseDocument.status == "pending", 1), else_=0)),
+            )
+            .group_by(KnowledgeBaseDocument.knowledge_base_id)
+            .all()
+        )
+        counts = {kb_id: (total, pending or 0) for kb_id, total, pending in rows}
+        return [_kb_to_dict(kb, *counts.get(kb.id, (0, 0))) for kb in kbs]
     finally:
         db.close()
 

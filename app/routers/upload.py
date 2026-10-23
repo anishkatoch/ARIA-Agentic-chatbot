@@ -90,7 +90,7 @@ def _spawn_background(coro) -> None:
     task.add_done_callback(_background_tasks.discard)
 
 
-ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".xlsx", ".xls", ".csv", ".zip"} | PLAIN_TEXT_EXTENSIONS
+ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xlsx", ".xls", ".csv", ".zip"} | PLAIN_TEXT_EXTENSIONS
 
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
@@ -653,7 +653,7 @@ async def ingest_url(
         try:
             vector_store = get_vector_store(session_id)
             metadatas    = [{"source": url, "chunk_index": i} for i in range(len(chunks))]
-            vector_store.add_texts(chunks, metadatas=metadatas)
+            await _add_texts_batched_parallel(vector_store, chunks, metadatas)
         except Exception as e:
             logger.error(f"[URL] Embed/store failed: {e}")
             yield sse({"type": "error", "message": "Failed to process and store the content. Please try again."})
@@ -691,7 +691,7 @@ async def ingest_api(request: APIIngestRequest, x_client_token: str = Header(def
     chunks       = chunk_text(text)
     vector_store = get_vector_store(str(session_id))
     metadatas    = [{"source": request.url, "chunk_index": i} for i in range(len(chunks))]
-    vector_store.add_texts(chunks, metadatas=metadatas)
+    await _add_texts_batched_parallel(vector_store, chunks, metadatas)
     logger.info(f"[API] Complete - {len(chunks)} chunks stored, time={time.time()-t0:.2f}s")
 
     return IngestResponse(session_id=session_id, message="API data processed and ready for chat")
