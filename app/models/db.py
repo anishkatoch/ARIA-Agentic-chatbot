@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, String, DateTime, Text, ForeignKey,
-    BigInteger, UniqueConstraint, Index
+    BigInteger, Boolean, Integer, UniqueConstraint, Index
 )
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.dialects.postgresql import UUID, ARRAY
@@ -88,7 +88,11 @@ class KnowledgeBase(Base):
 
 
 class KnowledgeBaseDocument(Base):
-    """A single file bundled into a KnowledgeBase."""
+    """A single file bundled into a KnowledgeBase. May have multiple
+    versions over time - see `version`/`is_superseded`/`previous_version_id`
+    below. `status` keeps its original pending/complete/failed pipeline
+    meaning and is untouched by versioning (see planning/
+    PLAN-document-versioning.md "Resolved: status field decision")."""
     __tablename__ = "knowledge_base_documents"
 
     id                = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -100,8 +104,26 @@ class KnowledgeBaseDocument(Base):
     vector_ids        = Column(Text, nullable=True)  # comma-separated vectorstore ids, for targeted delete
     uploaded_at       = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
+    # ── Versioning (see planning/PLAN-document-versioning.md) ──────────────
+    item_id             = Column(String, nullable=True, index=True)  # optional client-supplied identity key
+    content_hash        = Column(String, nullable=True, index=True)  # SHA256 of raw uploaded bytes
+    version             = Column(Integer, nullable=False, default=1)
+    previous_version_id = Column(UUID(as_uuid=True), ForeignKey("knowledge_base_documents.id"), nullable=True)
+    is_superseded       = Column(Boolean, nullable=False, default=False)
+    extracted_text       = Column(Text, nullable=True)  # full parsed text, for diffing only - never embedded
+
     __table_args__ = (
         Index("ix_kb_documents_knowledge_base_id", "knowledge_base_id"),
+        Index(
+            "uq_kb_documents_item_id_active", "knowledge_base_id", "item_id",
+            unique=True,
+            postgresql_where=(is_superseded.is_(False)) & (item_id.isnot(None)),
+        ),
+        Index(
+            "uq_kb_documents_filename_active", "knowledge_base_id", "filename",
+            unique=True,
+            postgresql_where=(is_superseded.is_(False)) & (item_id.is_(None)),
+        ),
     )
 
 

@@ -275,6 +275,40 @@ def find_page(char_offset: int, page_spans: list[dict]) -> tuple[int, float | No
 
 # ── Raw doc/metadata fetch (dual-backend: Chroma + PGVector) ──────────────────
 
+def _dedupe_to_latest_version(items: list, get_meta) -> list:
+    """Within items that share the same versioned-document identity
+    (metadata's item_id, falling back to source filename) and carry a
+    `version` number, keeps only the item(s) at the highest version seen -
+    so a default answer never silently mixes an old and a new version of
+    the same document. Deliberately conservative: any item missing
+    `version` or an identity key (item_id/source) - i.e. every chunk
+    uploaded before version metadata existed - is left untouched and
+    always kept, so this is a no-op for KBs/documents that predate
+    versioning. get_meta(item) -> dict extracts the metadata from each
+    item, so this works for both (text, meta) tuples and Document objects."""
+    highest: dict = {}
+    for item in items:
+        meta = get_meta(item) or {}
+        version = meta.get("version")
+        key = meta.get("item_id") or meta.get("source")
+        if version is None or key is None:
+            continue
+        if version > highest.get(key, -1):
+            highest[key] = version
+
+    if not highest:
+        return items
+
+    result = []
+    for item in items:
+        meta = get_meta(item) or {}
+        version = meta.get("version")
+        key = meta.get("item_id") or meta.get("source")
+        if version is None or key is None or key not in highest or version == highest[key]:
+            result.append(item)
+    return result
+
+
 def _fetch_all_docs_and_metas(vectorstore) -> tuple[list[str], list[dict]]:
     """Returns (documents, metadatas) for every chunk in this store, regardless
     of backend. Chroma exposes this directly via `_collection.get()`; PGVector
@@ -289,29 +323,38 @@ def _fetch_all_docs_and_metas(vectorstore) -> tuple[list[str], list[dict]]:
     ChromaDB dev sessions."""
     if hasattr(vectorstore, "_collection"):
         data = vectorstore._collection.get(include=["documents", "metadatas"])
-        return list(data.get("documents") or []), list(data.get("metadatas") or [])
+        docs, metas = list(data.get("documents") or []), list(data.get("metadatas") or [])
+    else:
+        collection_name = getattr(vectorstore, "collection_name", None)
+        if not collection_name:
+            return [], []
+        try:
+            from sqlalchemy import text
+            from app.services.vector_store import _get_db_engine
+            with _get_db_engine().connect() as conn:
+                rows = conn.execute(
+                    text(
+                        "SELECT e.document, e.cmetadata FROM langchain_pg_embedding e "
+                        "JOIN langchain_pg_collection c ON e.collection_id = c.uuid "
+                        "WHERE c.name = :collection"
+                    ),
+                    {"collection": collection_name},
+                ).fetchall()
+            docs  = [r[0] for r in rows]
+            metas = [dict(r[1] or {}) for r in rows]
+        except Exception as e:
+            logger.warning(f"[STORE] _fetch_all_docs_and_metas failed for PGVector collection={collection_name}: {e}")
+            return [], []
 
-    collection_name = getattr(vectorstore, "collection_name", None)
-    if not collection_name:
+    # Drop older-version chunks of any document that carries version
+    # metadata (see _dedupe_to_latest_version) - keeps BM25 indexing,
+    # source listing, and broad-context retrieval from mixing superseded
+    # content into a default answer. No-op for untagged/pre-versioning data.
+    items = _dedupe_to_latest_version(list(zip(docs, metas)), get_meta=lambda it: it[1])
+    if not items:
         return [], []
-    try:
-        from sqlalchemy import text
-        from app.services.vector_store import _get_db_engine
-        with _get_db_engine().connect() as conn:
-            rows = conn.execute(
-                text(
-                    "SELECT e.document, e.cmetadata FROM langchain_pg_embedding e "
-                    "JOIN langchain_pg_collection c ON e.collection_id = c.uuid "
-                    "WHERE c.name = :collection"
-                ),
-                {"collection": collection_name},
-            ).fetchall()
-        docs  = [r[0] for r in rows]
-        metas = [dict(r[1] or {}) for r in rows]
-        return docs, metas
-    except Exception as e:
-        logger.warning(f"[STORE] _fetch_all_docs_and_metas failed for PGVector collection={collection_name}: {e}")
-        return [], []
+    docs, metas = (list(x) for x in zip(*items))
+    return docs, metas
 
 
 # ── BM25 index (per session, rebuilt on demand) ───────────────────────────────
@@ -482,6 +525,10 @@ def _hybrid_retrieve(vectorstore, session_id: str, queries: list[str]) -> list:
 
     merged = _rrf_merge(all_lists, top_k=top_k)
     reranked = _rerank(queries[0], merged, cfg.rerank_top_n)
+    # MMR queries the vector store directly (not via _fetch_all_docs_and_metas,
+    # which already dedupes BM25's contribution) - apply the same latest-
+    # version filter here so MMR-sourced chunks get it too.
+    reranked = _dedupe_to_latest_version(reranked, get_meta=lambda d: d.metadata)
     logger.info(f"[HYBRID] queries={len(queries)}, merged={len(merged)}, final={len(reranked)}")
     return reranked
 
@@ -1046,6 +1093,8 @@ def _build_citations(docs: list) -> list[dict]:
             # Which attached source this came from ("My uploads", a KB name,
             # etc.) - None when only one source was attached.
             "knowledge_base": doc.metadata.get("origin_label"),
+            # None for chunks uploaded before version metadata existed.
+            "version":        doc.metadata.get("version"),
         })
         logger.debug(f"[CITE] source={citations[-1]['source']}, chunk={citations[-1]['chunk_index']}")
     return citations
@@ -1520,6 +1569,18 @@ def answer_question(
     if blocked:
         return safe_response, 0, []
 
+    # ── Compare/diff intent (Phase 8 of planning/PLAN-document-versioning.md) ─
+    # Isolated and defensive on purpose: try_compare_answer() never raises -
+    # any failure here falls through to the normal answer pipeline below,
+    # so this feature can never break an otherwise-working chat turn.
+    from app.services.compare_query import try_compare_answer
+    compare_result = try_compare_answer(question, sources)
+    if compare_result is not None:
+        answer, citations = compare_result
+        elapsed_ms = int((time.time() - t0) * 1000)
+        _history_append(session_id, "user", question)
+        _history_append(session_id, "assistant", answer)
+        return answer, elapsed_ms, citations
 
     # ── Cache check ────────────────────────────────────────────────
     cache_key = _cache_key(session_id, question, advanced, thinking, extra_session_ids)

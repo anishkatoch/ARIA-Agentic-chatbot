@@ -66,9 +66,13 @@ async def list_knowledge_base_files(request: Request, kb_id: uuid.UUID):
         return []
     db = factory()
     try:
+        # Every version of every document - older versions keep their
+        # vectors and stay directly queryable, so they're listed here too,
+        # not just the current one.
         docs = (
             db.query(KnowledgeBaseDocument)
-            .filter(KnowledgeBaseDocument.knowledge_base_id == kb_id, KnowledgeBaseDocument.status == "complete")
+            .filter(KnowledgeBaseDocument.knowledge_base_id == kb_id,
+                    KnowledgeBaseDocument.status == "complete")
             .order_by(KnowledgeBaseDocument.uploaded_at.asc())
             .all()
         )

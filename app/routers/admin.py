@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import AsyncGenerator
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.db.session import get_session_factory
@@ -27,7 +27,9 @@ from app.models.schemas import (
     UserRolesUpdateRequest,
 )
 from app.routers.upload import ALLOWED_EXTENSIONS, _add_texts_batched_parallel, sse, SSE_HEADERS
-from app.services import auth_service, kb_cache, roles_service
+from app.services import auth_service, kb_cache, kb_versioning, roles_service
+from app.services.dedup import sha256
+from app.services.diff import diff_texts
 from app.services.ingestion import parse_file
 from app.services.rag import chunk_text_with_offsets, find_page
 from app.services.vector_store import get_vector_store
@@ -65,11 +67,18 @@ def _kb_to_dict(kb: KnowledgeBase, document_count: int = 0, processing_count: in
 
 
 def _counts(db, kb_id) -> tuple[int, int]:
-    """(total documents, documents still pending) for a KB."""
-    total = db.query(KnowledgeBaseDocument).filter(KnowledgeBaseDocument.knowledge_base_id == kb_id).count()
+    """(total documents, documents still pending) for a KB. Counts every
+    row, including superseded versions - older versions stay fully visible
+    in this KB, not hidden, so they count too."""
+    total = (
+        db.query(KnowledgeBaseDocument)
+        .filter(KnowledgeBaseDocument.knowledge_base_id == kb_id)
+        .count()
+    )
     pending = (
         db.query(KnowledgeBaseDocument)
-        .filter(KnowledgeBaseDocument.knowledge_base_id == kb_id, KnowledgeBaseDocument.status == "pending")
+        .filter(KnowledgeBaseDocument.knowledge_base_id == kb_id,
+                KnowledgeBaseDocument.status == "pending")
         .count()
     )
     return total, pending
@@ -189,6 +198,10 @@ async def list_knowledge_base_files(request: Request, kb_id: uuid.UUID):
         kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id).first()
         if not kb:
             raise HTTPException(404, "Knowledge base not found")
+        # Every version of every document - older versions stay visible
+        # here too (not hidden), since their vectors are kept and they
+        # remain directly queryable in chat, not just reachable through
+        # the diff/compare feature.
         docs = (
             db.query(KnowledgeBaseDocument)
             .filter(KnowledgeBaseDocument.knowledge_base_id == kb.id)
@@ -203,6 +216,9 @@ async def list_knowledge_base_files(request: Request, kb_id: uuid.UUID):
                 "chunks_stored": d.chunks_stored,
                 "status":        d.status,
                 "uploaded_at":   d.uploaded_at.isoformat() if d.uploaded_at else None,
+                "item_id":       d.item_id,
+                "version":       d.version,
+                "is_superseded": d.is_superseded,
             }
             for d in docs
         ]
@@ -250,6 +266,89 @@ async def delete_knowledge_base_file(request: Request, kb_id: uuid.UUID, doc_id:
     return {"status": "ok"}
 
 
+def _version_to_dict(d: KnowledgeBaseDocument) -> dict:
+    return {
+        "id":            str(d.id),
+        "filename":      d.filename,
+        "item_id":       d.item_id,
+        "version":       d.version,
+        "is_superseded": d.is_superseded,
+        "content_hash":  d.content_hash,
+        "file_size":     d.file_size,
+        "status":        d.status,
+        "uploaded_at":   d.uploaded_at.isoformat() if d.uploaded_at else None,
+    }
+
+
+@router.get("/knowledge-bases/{kb_id}/documents/{filename}/versions")
+async def list_document_versions(request: Request, kb_id: uuid.UUID, filename: str):
+    """Version history for a filename uploaded without an item_id."""
+    _require_admin(request)
+    db = _db()
+    try:
+        docs = (
+            db.query(KnowledgeBaseDocument)
+            .filter(
+                KnowledgeBaseDocument.knowledge_base_id == kb_id,
+                KnowledgeBaseDocument.item_id.is_(None),
+                KnowledgeBaseDocument.filename == filename,
+            )
+            .order_by(KnowledgeBaseDocument.version.asc())
+            .all()
+        )
+        return [_version_to_dict(d) for d in docs]
+    finally:
+        db.close()
+
+
+@router.get("/knowledge-bases/{kb_id}/items/{item_id}/versions")
+async def list_item_versions(request: Request, kb_id: uuid.UUID, item_id: str):
+    """Version history by item_id - returns every version even if the
+    filename changed between uploads (see planning/PLAN-document-versioning.md
+    "Using item_id to handle a renamed file")."""
+    _require_admin(request)
+    db = _db()
+    try:
+        docs = (
+            db.query(KnowledgeBaseDocument)
+            .filter(
+                KnowledgeBaseDocument.knowledge_base_id == kb_id,
+                KnowledgeBaseDocument.item_id == item_id,
+            )
+            .order_by(KnowledgeBaseDocument.version.asc())
+            .all()
+        )
+        return [_version_to_dict(d) for d in docs]
+    finally:
+        db.close()
+
+
+@router.get("/knowledge-bases/documents/{doc_id}/diff")
+async def diff_documents(request: Request, doc_id: uuid.UUID, against: uuid.UUID):
+    """Unified diff between any two document rows - two versions of the same
+    item/filename, or two unrelated documents. Diffs the stored
+    extracted_text (saved at upload time), not re-parsed from the file and
+    never derived from embeddings."""
+    _require_admin(request)
+    db = _db()
+    try:
+        doc_a = db.query(KnowledgeBaseDocument).filter(KnowledgeBaseDocument.id == doc_id).first()
+        doc_b = db.query(KnowledgeBaseDocument).filter(KnowledgeBaseDocument.id == against).first()
+        if not doc_a or not doc_b:
+            raise HTTPException(404, "Document not found")
+        if doc_a.extracted_text is None or doc_b.extracted_text is None:
+            raise HTTPException(409, "One of these documents has no stored text to diff (still processing or failed).")
+
+        result = diff_texts(doc_a.extracted_text, doc_b.extracted_text)
+        return {
+            "from": _version_to_dict(doc_a),
+            "to":   _version_to_dict(doc_b),
+            **result,
+        }
+    finally:
+        db.close()
+
+
 # ── File upload (bundles files into a KB's vector store) ─────────────────────
 
 @router.post("/knowledge-bases/{kb_id}/files")
@@ -257,7 +356,14 @@ async def upload_knowledge_base_files(
     request: Request,
     kb_id: uuid.UUID,
     files: list[UploadFile] = File(...),
+    item_ids: list[str] | None = Form(None),
 ):
+    """item_ids (optional): one per file, same order as `files`. When given
+    for a file, it - not the filename - is the identity key used to decide
+    "is this a new document or a new version of an existing one", which lets
+    a renamed file still be recognized as an update (see
+    planning/PLAN-document-versioning.md). Omit it (or leave that entry
+    blank) to fall back to filename-based matching, same as before."""
     _require_admin(request)
 
     db = _db()
@@ -269,12 +375,25 @@ async def upload_knowledge_base_files(
     finally:
         db.close()
 
+    # item_ids is aligned to `files` by position. If the count doesn't match
+    # (client sent too few/many), ignore it entirely rather than risk
+    # silently pairing the wrong item_id with the wrong file.
+    if item_ids is not None and len(item_ids) != len(files):
+        logger.warning(
+            f"[ADMIN][KB] item_ids length ({len(item_ids)}) != files length "
+            f"({len(files)}) - ignoring item_ids for this upload"
+        )
+        item_ids = None
+
     supported_files = []
+    supported_item_ids: list[str | None] = []
     skipped_files: list[tuple[str, str]] = []
-    for f in files:
+    for idx, f in enumerate(files):
         ext = os.path.splitext(f.filename)[1].lower()
         if ext in ALLOWED_EXTENSIONS:
             supported_files.append(f)
+            raw_item_id = item_ids[idx] if item_ids else None
+            supported_item_ids.append(raw_item_id.strip() if raw_item_id and raw_item_id.strip() else None)
         else:
             skipped_files.append((f.filename, ext))
 
@@ -299,27 +418,67 @@ async def upload_knowledge_base_files(
 
         for i, (filename, content) in enumerate(file_data):
             stage = f"process_{i}"
+            item_id = supported_item_ids[i]
+            content_hash = await asyncio.to_thread(sha256, content)
 
-            # Write a "pending" row immediately - so anyone opening this KB's
-            # file list (or the dashboard's processing badge) while this is
-            # still running sees that it's in flight, not silently absent.
-            doc_id = uuid.uuid4()
+            # Decide new / exact-duplicate / new-version, and (for a new
+            # version) supersede the previous active row, all in one
+            # transaction - see planning/PLAN-document-versioning.md
+            # "Upload flow". No confirmation is asked for a version bump:
+            # it proceeds automatically.
             _db1 = _db()
             try:
-                _db1.add(KnowledgeBaseDocument(
-                    id=doc_id, knowledge_base_id=kb_id, filename=filename,
-                    file_size=len(content), status="pending",
-                ))
+                decision = kb_versioning.decide_upload_action(_db1, kb_id, filename, item_id, content_hash)
+
+                if decision.action == kb_versioning.DUPLICATE:
+                    _db1.close()
+                    yield sse({
+                        "type": "warning",
+                        "message": (
+                            f"{filename} wasn't processed - this exact file is already "
+                            f"here (uploaded {decision.existing.uploaded_at.isoformat() if decision.existing.uploaded_at else 'previously'})."
+                        ),
+                    })
+                    await asyncio.sleep(0)
+                    continue
+
+                previous = decision.existing if decision.action == kb_versioning.VERSION else None
+                doc = kb_versioning.start_new_version(
+                    _db1, kb_id, filename, len(content), item_id, content_hash, previous=previous
+                )
+                doc_id = doc.id
+                new_version = doc.version
+                versioned_info = None
+                if previous is not None:
+                    versioned_info = {
+                        "versioned": True,
+                        "new_version": new_version,
+                        "previous_version": previous.version,
+                        "previous_uploaded_at": previous.uploaded_at.isoformat() if previous.uploaded_at else None,
+                    }
                 _db1.commit()
             finally:
                 _db1.close()
+
+            if versioned_info:
+                yield sse({
+                    "type": "info",
+                    "message": (
+                        f"{filename} - content changed since the last upload; saved as "
+                        f"version {versioned_info['new_version']} "
+                        f"(version {versioned_info['previous_version']} from "
+                        f"{versioned_info['previous_uploaded_at']} stays in the knowledge base too)."
+                    ),
+                })
+                await asyncio.sleep(0)
 
             yield sse({"type": "step", "status": "start", "stage": stage,
                        "title": "Processing file", "message": f"Processing {filename}"})
             await asyncio.sleep(0)
             t1 = time.time()
 
-            def _mark(status: str, chunks_stored: int | None = None, vector_ids: list[str] | None = None):
+            def _mark(status: str, chunks_stored: int | None = None, vector_ids: list[str] | None = None,
+                      extracted_text: str | None = None):
                 _db3 = _db()
                 try:
                     row = _db3.query(KnowledgeBaseDocument).filter(KnowledgeBaseDocument.id == doc_id).first()
@@ -329,6 +488,8 @@ async def upload_knowledge_base_files(
                             row.chunks_stored = chunks_stored
                         if vector_ids is not None:
                             row.vector_ids = ",".join(vector_ids)
+                        if extracted_text is not None:
+                            row.extracted_text = extracted_text
                         _db3.commit()
                 finally:
                     _db3.close()
@@ -346,10 +507,22 @@ async def upload_knowledge_base_files(
             for chunk, start_idx in chunks_with_offsets:
                 page_number, confidence = find_page(start_idx, page_spans)
                 batch_metas.append({
-                    "source":      filename,
-                    "chunk_index": total_chunks + len(batch_texts),
-                    "page_number": page_number,
-                    "confidence":  confidence,
+                    "source":        filename,
+                    "chunk_index":   total_chunks + len(batch_texts),
+                    "page_number":   page_number,
+                    "confidence":    confidence,
+                    # Version identity (see planning/PLAN-document-versioning.md
+                    # and app.services.rag._dedupe_to_latest_version) - lets
+                    # retrieval tell two versions of the same document apart
+                    # even when they share a filename, instead of silently
+                    # mixing old and new content into one answer. Not
+                    # including is_superseded here - it would go stale the
+                    # moment a later version is uploaded, since old chunks'
+                    # metadata is never touched again; the DB row's
+                    # is_superseded is the single source of truth for that.
+                    "document_id":   str(doc_id),
+                    "item_id":       item_id,
+                    "version":       new_version,
                 })
                 batch_texts.append(chunk)
 
@@ -362,13 +535,25 @@ async def upload_knowledge_base_files(
                     _mark("failed")
                     yield sse({"type": "error", "stage": stage,
                                "message": f"Failed to embed {filename}. Check your embedding provider and try again."})
+                    # Deliberately do NOT delete the previous version's
+                    # vectors here - the old version keeps serving
+                    # retrieval until a successful retry (see
+                    # planning/PLAN-document-versioning.md, Phase 3 step 14).
                     return
 
             file_chunks   = len(batch_texts)
             total_chunks += file_chunks
             elapsed = round(time.time() - t1, 2)
 
-            _mark("complete", file_chunks, vector_ids)
+            _mark("complete", file_chunks, vector_ids, extracted_text=text)
+
+            # A superseded version's vectors are deliberately kept in the
+            # store, not deleted - both the old and new version stay
+            # directly queryable in chat, not just reachable through the
+            # diff/compare feature. (Caveat: if two versions share the
+            # exact same filename, their chunks carry identical "source"
+            # metadata and become indistinguishable at retrieval time - use
+            # distinct filenames per version, or item_id, to avoid that.)
 
             logger.info(f"[ADMIN][KB] {filename} -> {file_chunks} chunks into kb={kb_id} session={session_id}")
             yield sse({"type": "step", "status": "done", "stage": stage,

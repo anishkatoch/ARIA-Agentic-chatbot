@@ -227,6 +227,11 @@
   <div class="admin-modal admin-modal-lg">
     <h3 id="files-modal-title">Files</h3>
 
+    <div class="files-item-id-row">
+      <label for="files-item-id">Item ID <span class="files-hint">(optional - re-upload with the same Item ID to save it as a new version, even if you rename the file)</span></label>
+      <input type="text" id="files-item-id" placeholder="e.g. pricing-sheet" />
+    </div>
+
     <div class="files-dropzone" id="files-dropzone">
       <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
       <p>Drag &amp; drop files here, or <label for="files-input" class="files-browse">browse</label></p>
@@ -237,7 +242,7 @@
     <div id="files-progress" class="files-progress hidden"></div>
 
     <table class="files-table">
-      <thead><tr><th>Filename</th><th>Size</th><th>Chunks</th><th>Status</th><th>Uploaded</th><th></th></tr></thead>
+      <thead><tr><th>Filename</th><th>Item ID</th><th>Version</th><th>Size</th><th>Chunks</th><th>Status</th><th>Uploaded</th><th></th></tr></thead>
       <tbody id="files-table-body"></tbody>
     </table>
 
