@@ -668,6 +668,7 @@ function openFilesModal(kbId) {
   document.getElementById('files-modal-title').textContent = `Files - ${kb ? kb.name : ''}`;
   document.getElementById('files-progress').classList.add('hidden');
   document.getElementById('files-progress').innerHTML = '';
+  document.getElementById('files-item-id').value = '';
   document.getElementById('files-modal-backdrop').classList.remove('hidden');
   loadKbFiles(kbId);
 }
@@ -694,6 +695,11 @@ async function loadKbFiles(kbId) {
     tbody.innerHTML = files.map(f => `
       <tr>
         <td>${escHtml(f.filename)}</td>
+        <td>${f.item_id ? escHtml(f.item_id) : '<span class="files-hint">-</span>'}</td>
+        <td>
+          v${f.version ?? 1}${f.is_superseded ? ' <span class="files-hint">(older)</span>' : ''}
+          <button class="file-history-btn" title="View version history" onclick="viewFileHistory('${kbId}', '${escHtml(f.filename).replace(/'/g, "&#39;")}', ${f.item_id ? `'${escHtml(f.item_id).replace(/'/g, "&#39;")}'` : 'null'})">history</button>
+        </td>
         <td>${humanSize(f.file_size)}</td>
         <td>${f.chunks_stored ?? '-'}</td>
         <td>${f.status === 'pending' ? '<span class="kb-processing-badge" style="display:inline-flex"><span class="kb-spinner"></span> processing</span>' : escHtml(f.status)}</td>
@@ -710,6 +716,50 @@ async function loadKbFiles(kbId) {
     }
   } catch (e) {
     tbody.innerHTML = `<tr><td colspan="6">Failed to load files.</td></tr>`;
+  }
+}
+
+async function viewFileHistory(kbId, filename, itemId) {
+  try {
+    const url = itemId
+      ? `/admin/knowledge-bases/${kbId}/items/${encodeURIComponent(itemId)}/versions`
+      : `/admin/knowledge-bases/${kbId}/documents/${encodeURIComponent(filename)}/versions`;
+    const res = await fetch(url, { headers: authHeaders() });
+    if (handleAuthError(res)) return;
+    const versions = await res.json();
+    if (!versions.length) { alert('No version history found.'); return; }
+
+    const lines = versions.map(v =>
+      `v${v.version}${v.is_superseded ? ' (superseded)' : ' (current)'} - ${v.filename} - uploaded ${v.uploaded_at ? new Date(v.uploaded_at).toLocaleString() : 'unknown'}`
+    );
+
+    if (versions.length < 2) {
+      alert(`Only one version on file:\n\n${lines.join('\n')}`);
+      return;
+    }
+
+    const latest = versions[versions.length - 1];
+    const previous = versions[versions.length - 2];
+    const diffRes = await fetch(
+      `/admin/knowledge-bases/documents/${latest.id}/diff?against=${previous.id}`,
+      { headers: authHeaders() }
+    );
+    if (!diffRes.ok) {
+      alert(`Version history:\n\n${lines.join('\n')}\n\n(Diff unavailable.)`);
+      return;
+    }
+    const diff = await diffRes.json();
+    const diffLines = diff.lines
+      .filter(l => l.type !== 'unchanged')
+      .slice(0, 40)
+      .map(l => `${l.type === 'added' ? '+' : '-'} ${l.text}`);
+    alert(
+      `Version history:\n\n${lines.join('\n')}\n\n` +
+      `Diff (v${previous.version} -> v${latest.version}), ${diff.lines_added} added / ${diff.lines_removed} removed:\n\n` +
+      (diffLines.length ? diffLines.join('\n') : '(no line-level changes)')
+    );
+  } catch (e) {
+    alert('Failed to load version history.');
   }
 }
 
@@ -763,8 +813,24 @@ async function uploadFiles(fileList) {
   progressEl.classList.remove('hidden');
   progressEl.innerHTML = '';
 
+  const itemId = (document.getElementById('files-item-id').value || '').trim();
+  if (itemId && fileList.length > 1) {
+    alert(
+      'An Item ID identifies one logical document. Upload one file at a time ' +
+      'when using an Item ID, or clear it to upload multiple unrelated files.'
+    );
+    return;
+  }
+
   const formData = new FormData();
   for (const f of fileList) formData.append('files', f);
+  // item_ids must align 1:1 with files by position - the backend ignores
+  // the whole list if the counts don't match. The same item_id (if any) is
+  // applied to every file in this batch; leave the field blank to fall
+  // back to filename-based matching.
+  if (itemId) {
+    for (let i = 0; i < fileList.length; i++) formData.append('item_ids', itemId);
+  }
 
   const addRow = (text, cls = '', spinner = false) => {
     const row = document.createElement('div');

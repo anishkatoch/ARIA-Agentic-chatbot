@@ -390,12 +390,14 @@ html.dark .admin-modal .input-wrap input:focus {
 }
 .files-table td { padding: 8px 8px; border-bottom: 1px solid var(--border); }
 .files-table tbody tr:last-child td { border-bottom: none; }
-.files-table th:nth-child(1), .files-table td:nth-child(1) { width: 34%; word-break: break-word; }
-.files-table th:nth-child(2), .files-table td:nth-child(2) { width: 10%; white-space: nowrap; }
-.files-table th:nth-child(3), .files-table td:nth-child(3) { width: 9%; white-space: nowrap; }
-.files-table th:nth-child(4), .files-table td:nth-child(4) { width: 17%; white-space: nowrap; }
-.files-table th:nth-child(5), .files-table td:nth-child(5) { width: 22%; white-space: nowrap; }
-.files-table th:nth-child(6), .files-table td:nth-child(6) { width: 8%; }
+.files-table th:nth-child(1), .files-table td:nth-child(1) { width: 24%; word-break: break-word; }
+.files-table th:nth-child(2), .files-table td:nth-child(2) { width: 12%; word-break: break-word; }
+.files-table th:nth-child(3), .files-table td:nth-child(3) { width: 12%; white-space: nowrap; }
+.files-table th:nth-child(4), .files-table td:nth-child(4) { width: 8%; white-space: nowrap; }
+.files-table th:nth-child(5), .files-table td:nth-child(5) { width: 7%; white-space: nowrap; }
+.files-table th:nth-child(6), .files-table td:nth-child(6) { width: 13%; white-space: nowrap; }
+.files-table th:nth-child(7), .files-table td:nth-child(7) { width: 17%; white-space: nowrap; }
+.files-table th:nth-child(8), .files-table td:nth-child(8) { width: 7%; }
 /* The processing badge (icon + text) is wider than a narrow status column
    allows - without this it visually spills into the "Uploaded" cell next to
    it instead of wrapping or clipping cleanly. */
@@ -407,6 +409,21 @@ html.dark .admin-modal .input-wrap input:focus {
   padding: 4px; display: flex; align-items: center;
 }
 .file-delete-btn:hover { color: #e04848; }
+
+.files-item-id-row { margin-bottom: 12px; }
+.files-item-id-row label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+.files-item-id-row .files-hint { display: inline; margin: 0 0 0 4px; font-weight: 400; }
+.files-item-id-row input {
+  width: 100%; padding: 7px 10px; border-radius: var(--radius-sm, 8px);
+  border: 1px solid var(--border); background: var(--bg); color: var(--text);
+  font-size: 13.5px;
+}
+
+.file-history-btn {
+  background: none; border: none; cursor: pointer; padding: 0 0 0 6px;
+  color: var(--accent); font-size: 12px; text-decoration: underline;
+}
+.file-history-btn:hover { opacity: 0.8; }
 
 /* ── Role chips (shared by KB access + user roles) ───────────────
    The chips are a live PREVIEW of the current selection, secondary to the
