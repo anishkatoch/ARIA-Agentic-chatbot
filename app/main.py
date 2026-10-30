@@ -19,7 +19,7 @@ setup_logging()
 
 logger = logging.getLogger(__name__)
 
-from app.config import DEFAULT_SESSION_ID
+from app.config import DEFAULT_SESSION_ID, cfg
 
 _STATIC_DIR  = os.path.join(os.path.dirname(__file__), "static")
 _SAMPLE_FILE = os.path.join(os.path.dirname(__file__), "data", "sample-ai-overview.txt")
@@ -47,7 +47,20 @@ _ADMIN_PREFIXES = ("/admin/",)
 
 
 async def _seed_default_session():
-    """Ingest the sample file into the default session if not already done."""
+    """Startup: sync the default session from the Supabase bucket
+    (cfg.default_kb_bucket) if it has any files in it. Falls back to the
+    bundled sample-ai-overview.txt (only if the default session is still
+    completely empty) so there's always something to chat against before
+    anyone has added files to the bucket."""
+    try:
+        from app.services.default_kb_sync import sync_default_session_from_bucket
+        processed = await sync_default_session_from_bucket()
+        if processed:
+            logger.info(f"[DEFAULT] Synced {processed} file(s) from Supabase bucket into default session")
+            return
+    except Exception as e:
+        logger.warning(f"[DEFAULT] Bucket sync failed, falling back to bundled sample: {e}")
+
     try:
         from app.services.vector_store import get_vector_store, session_has_data
         from app.services.rag import chunk_text
@@ -70,6 +83,23 @@ async def _seed_default_session():
         logger.info(f"[DEFAULT] Sample seeded - {len(chunks)} chunks into session={DEFAULT_SESSION_ID}")
     except Exception as e:
         logger.warning(f"[DEFAULT] Could not seed sample session: {e}")
+
+
+async def _periodic_default_kb_sync():
+    """Re-checks the Supabase default-KB bucket every
+    cfg.default_kb_sync_interval_s so files added/changed there while the
+    server is already running get picked up without a restart. Unchanged
+    files are a cheap no-op (dedup same_hash short-circuit in ingest_bytes)."""
+    await asyncio.sleep(cfg.default_kb_sync_interval_s)
+    while True:
+        try:
+            from app.services.default_kb_sync import sync_default_session_from_bucket
+            processed = await sync_default_session_from_bucket()
+            if processed:
+                logger.info(f"[DEFAULT_KB] Periodic sync processed {processed} file(s)")
+        except Exception as e:
+            logger.warning(f"[DEFAULT_KB] Periodic sync error: {e}")
+        await asyncio.sleep(cfg.default_kb_sync_interval_s)
 
 
 async def _warmup_embeddings():
@@ -164,10 +194,14 @@ async def lifespan(app: FastAPI):
     await _seed_default_session()
     await _warmup()
     cleanup_task = asyncio.create_task(_periodic_cleanup())
+    default_kb_task = asyncio.create_task(_periodic_default_kb_sync())
     yield
     cleanup_task.cancel()
+    default_kb_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await cleanup_task
+    with contextlib.suppress(asyncio.CancelledError):
+        await default_kb_task
     logger.info("Server shutting down.")
 
 
