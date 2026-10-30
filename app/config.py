@@ -80,6 +80,14 @@ class _Config:
         self.supabase_anon_key: str     = os.getenv("SUPABASE_ANON_KEY", "")
         self.supabase_service_key: str  = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
+        # Supabase Storage bucket backing the default/sample chat session -
+        # files dropped here replace the bundled sample doc as what a user
+        # with no uploads of their own talks to. Polled every
+        # default_kb_sync_interval_s so new/changed files there are picked
+        # up without a server restart.
+        self.default_kb_bucket: str            = os.getenv("DEFAULT_KB_BUCKET", "aria")
+        self.default_kb_sync_interval_s: int    = int(os.getenv("DEFAULT_KB_SYNC_INTERVAL_S", "120"))
+
         # ── Auth / JWT ────────────────────────────────────────────
         self.jwt_secret: str     = os.getenv("JWT_SECRET", "change-me-in-production-use-a-long-random-string")
         self.jwt_algorithm: str  = "HS256"
