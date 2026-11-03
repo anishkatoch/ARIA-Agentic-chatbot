@@ -1,0 +1,7 @@
+sqlalchemy
+psycopg2-binary
+langchain-core
+langchain-openai
+langchain-postgres>=0.0.17
+langchain-chroma>=1.1.0
+voyageai

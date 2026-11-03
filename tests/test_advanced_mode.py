@@ -338,18 +338,18 @@ class TestBackendHeader:
 class TestNeo4jConnection:
 
     def test_neo4j_driver_connects(self):
-        from app.services.graph_store import _get_driver
+        from graph_store_pipeline.core import _get_driver
         driver = _get_driver()
         assert driver is not None, "Neo4j driver should connect - check NEO4J_URI/USER/PASSWORD in .env"
 
     def test_neo4j_connection_is_alive(self):
-        from app.services.graph_store import _get_driver
+        from graph_store_pipeline.core import _get_driver
         driver = _get_driver()
         assert driver is not None
         driver.verify_connectivity()  # raises if dead
 
     def test_neo4j_can_run_query(self):
-        from app.services.graph_store import _get_driver
+        from graph_store_pipeline.core import _get_driver
         driver = _get_driver()
         assert driver is not None
         with driver.session() as session:
@@ -358,16 +358,38 @@ class TestNeo4jConnection:
             assert record["n"] == 1, "Neo4j should return 1 for RETURN 1"
 
     def test_query_graph_returns_string(self):
-        from app.services.graph_store import query_graph
+        from graph_store_pipeline import query_graph
         result = query_graph("test question", "nonexistent_session_xyz")
         assert isinstance(result, str), "query_graph must always return a string"
 
     def test_build_graph_returns_bool(self):
-        from app.services.graph_store import build_graph
+        from graph_store_pipeline import build_graph
         from app.services.rag import get_llm
         # Empty chunks - should return False gracefully
         result = build_graph([], "test_session_empty", get_llm())
         assert isinstance(result, bool), "build_graph must return a bool"
+
+
+# ── 7b. Cosmos DB Gremlin fallback (only used when Neo4j is unreachable) ────
+
+class TestCosmosGremlinFallback:
+
+    def test_gremlin_client_connects_when_configured(self):
+        from graph_store_pipeline.config import cfg
+        if not cfg.cosmos_gremlin_key:
+            pytest.skip("COSMOS_GREMLIN_KEY not set in .env - fallback not configured")
+        from graph_store_pipeline.core import _get_gremlin_client
+        gclient = _get_gremlin_client()
+        assert gclient is not None, "Cosmos Gremlin client should connect - check COSMOS_GREMLIN_* in .env"
+
+    def test_query_graph_falls_back_when_neo4j_down(self, monkeypatch):
+        from graph_store_pipeline.config import cfg
+        if not cfg.cosmos_gremlin_key:
+            pytest.skip("COSMOS_GREMLIN_KEY not set in .env - fallback not configured")
+        import graph_store_pipeline.core as graph_core
+        monkeypatch.setattr(graph_core, "_get_driver", lambda: None)
+        result = graph_core.query_graph("test question", "nonexistent_session_xyz")
+        assert isinstance(result, str), "query_graph must always return a string, even via the Cosmos fallback"
 
 
 # ── 8. Full pipeline both modes ───────────────────────────────────────────────

@@ -330,8 +330,8 @@ def _fetch_all_docs_and_metas(vectorstore) -> tuple[list[str], list[dict]]:
             return [], []
         try:
             from sqlalchemy import text
-            from app.services.vector_store import _get_db_engine
-            with _get_db_engine().connect() as conn:
+            from vector_store_pipeline import get_db_engine
+            with get_db_engine().connect() as conn:
                 rows = conn.execute(
                     text(
                         "SELECT e.document, e.cmetadata FROM langchain_pg_embedding e "
@@ -645,9 +645,12 @@ def _resolve_target_sources(question: str, sources: list[dict]) -> list[str] | N
         fname = s["source"]
         stem = re.sub(r'\.[a-z0-9]{1,5}$', '', fname, flags=re.IGNORECASE).lower()
         stem_norm = re.sub(r'[\s_\-.]+', ' ', stem).strip()
-        stem_core = re.sub(r'(\s+v?\d[\d.]*)+$', '', stem_norm, flags=re.IGNORECASE).strip()
+        version_tokens = stem_norm.split(' ')
+        while version_tokens and re.fullmatch(r'v?\d[\d.]*', version_tokens[-1], re.IGNORECASE):
+            version_tokens.pop()
+        stem_core = ' '.join(version_tokens).strip()
         stem_core = re.sub(r'^(google chat|outlook chat)\s*[-:]*\s*', '', stem_core, flags=re.IGNORECASE)
-        stem_core = re.sub(r'\s*\([a-z0-9]+\)\s*$', '', stem_core, flags=re.IGNORECASE).strip()
+        stem_core = re.sub(r'\([a-z0-9]+\)$', '', stem_core.rstrip(), flags=re.IGNORECASE).strip()
         fname_l = fname.lower()
         if (
             fname_l in q
@@ -973,7 +976,7 @@ def node_simple_answer(state: RAGState) -> RAGState:
     return state
 
 
-# ── Advanced pipeline nodes (QueryRewrite → Hybrid + Neo4j → LLM) ────────────
+# ── Advanced pipeline nodes (QueryRewrite → Hybrid + Graph (Neo4j/Cosmos) → LLM) ────────────
 
 def node_query_rewrite(state: RAGState) -> RAGState:
     question = state["question"]
@@ -999,16 +1002,16 @@ def node_advanced_retrieve(state: RAGState) -> RAGState:
     docs = _merge_source_docs(state["sources"], state["question"], state["queries"])
     state["vector_docs"] = docs
 
-    # Graph retrieval - once per attached source, so one source's Neo4j
+    # Graph retrieval - once per attached source, so one source's graph backend
     # failure doesn't wipe out graph context the others successfully returned.
-    from app.services.graph_store import query_graph
+    from graph_store_pipeline import query_graph
     parts = []
     for src in state["sources"]:
         try:
             ctx = query_graph(state["question"], src["session_id"])
         except Exception as e:
             logger.warning(
-                f"[ADVANCED] Neo4j graph retrieval failed for "
+                f"[ADVANCED] Graph retrieval failed for "
                 f"{src.get('label') or 'personal session'} ({e}) - using vector only for it"
             )
             continue
@@ -1080,6 +1083,49 @@ def _direct_answer(question: str, history: list[dict] | None = None) -> tuple[st
 
 
 # ── Build citations ───────────────────────────────────────────────────────────
+
+def _dedupe_docs(docs: list) -> list:
+    """Drops repeat (source, chunk_index) pairs - the same chunk can be
+    returned twice if the ReAct agent calls a tool more than once (e.g.
+    re-querying vector_search with a different phrasing)."""
+    seen = set()
+    out = []
+    for d in docs:
+        key = (d.metadata.get("source"), d.metadata.get("chunk_index"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(d)
+    return out
+
+
+_CITED_LINE = re.compile(r'\n?CITED:\s*(.*)\s*\Z', re.IGNORECASE)
+
+
+def _apply_citation_filter(answer: str, collected_docs: list) -> tuple[str, list]:
+    """Strips the trailing "CITED: 1,3" line the ReAct agent is instructed to
+    append and uses it to narrow collected_docs down to only the sources it
+    says it actually drew on - otherwise every chunk retrieved during the
+    tool-calling loop would be shown as a citation, including ones the model
+    looked at and discarded. Falls back to the full (deduped) list if the
+    line is missing or doesn't parse, so citations degrade gracefully rather
+    than disappearing."""
+    m = _CITED_LINE.search(answer.strip())
+    if not m:
+        return answer, _dedupe_docs(collected_docs)
+
+    clean_answer = answer[:m.start()].rstrip()
+    raw = m.group(1).strip()
+    if raw.lower() == "none":
+        return clean_answer, []
+
+    used_ids = {int(x) for x in re.findall(r'\d+', raw)}
+    if not used_ids:
+        return clean_answer, _dedupe_docs(collected_docs)
+
+    filtered = [d for d in collected_docs if d.metadata.get("cite_id") in used_ids]
+    return clean_answer, _dedupe_docs(filtered)
+
 
 def _build_citations(docs: list) -> list[dict]:
     citations = []
@@ -1170,6 +1216,28 @@ def _slugify(label: str) -> str:
     return slug or "source"
 
 
+def _tag_and_collect(docs: list, collected_docs: list) -> list:
+    """Assigns each doc a stable, 1-based cite_id (continuing the running
+    count in collected_docs) and appends it. The id is embedded in the tool
+    output shown to the model so it can report back which ones it actually
+    used (see CITED: line in the system prompt) - without this, every
+    retrieved chunk would be shown as a citation, not just the ones that
+    made it into the answer."""
+    start = len(collected_docs)
+    for i, d in enumerate(docs):
+        d.metadata["cite_id"] = start + i + 1
+    collected_docs.extend(docs)
+    return docs
+
+
+def _format_tool_docs(docs: list) -> str:
+    return "\n\n---\n\n".join(
+        f"[Source #{d.metadata.get('cite_id', '?')}: {d.metadata.get('source','?')} "
+        f"p.{d.metadata.get('page_number','?')}]\n{d.page_content}"
+        for d in docs
+    )
+
+
 def _extra_source_tools(src: dict, collected_docs: list) -> tuple:
     """Builds a uniquely-named vector_search/read_source tool pair for one
     attached knowledge base, so the ReAct agent can tell it apart from the
@@ -1191,11 +1259,8 @@ def _extra_source_tools(src: dict, collected_docs: list) -> tuple:
             return "No results found."
         for d in docs:
             d.metadata["origin_label"] = label
-        collected_docs.extend(docs)
-        return "\n\n---\n\n".join(
-            f"[Source: {d.metadata.get('source','?')} p.{d.metadata.get('page_number','?')}]\n{d.page_content}"
-            for d in docs
-        )
+        _tag_and_collect(docs, collected_docs)
+        return _format_tool_docs(docs)
     vector_search.description = f"(Knowledge base: {label}) {vector_search.description}"
 
     @tool(f"read_source_{slug}")
@@ -1223,11 +1288,8 @@ def _extra_source_tools(src: dict, collected_docs: list) -> tuple:
             return f"No content found for source(s): {', '.join(resolved)}"
         for d in docs:
             d.metadata["origin_label"] = label
-        collected_docs.extend(docs)
-        return "\n\n---\n\n".join(
-            f"[Source: {d.metadata.get('source','?')} p.{d.metadata.get('page_number','?')}]\n{d.page_content}"
-            for d in docs
-        )
+        _tag_and_collect(docs, collected_docs)
+        return _format_tool_docs(docs)
     read_source.description = f"(Knowledge base: {label}) {read_source.description}"
 
     return vector_search, read_source
@@ -1254,11 +1316,8 @@ def _react_tools(vectorstore, session_id: str, use_graph: bool, clarify_allowed:
         docs = _hybrid_retrieve(vectorstore, session_id, [query])
         if not docs:
             return "No results found."
-        collected_docs.extend(docs)
-        return "\n\n---\n\n".join(
-            f"[Source: {d.metadata.get('source','?')} p.{d.metadata.get('page_number','?')}]\n{d.page_content}"
-            for d in docs
-        )
+        _tag_and_collect(docs, collected_docs)
+        return _format_tool_docs(docs)
 
     @tool
     def read_source(name: str) -> str:
@@ -1286,11 +1345,8 @@ def _react_tools(vectorstore, session_id: str, use_graph: bool, clarify_allowed:
         docs = _fetch_broad_context(vectorstore, session_id, resolved)
         if not docs:
             return f"No content found for source(s): {', '.join(resolved)}"
-        collected_docs.extend(docs)
-        return "\n\n---\n\n".join(
-            f"[Source: {d.metadata.get('source','?')} p.{d.metadata.get('page_number','?')}]\n{d.page_content}"
-            for d in docs
-        )
+        _tag_and_collect(docs, collected_docs)
+        return _format_tool_docs(docs)
 
     tools = [vector_search, read_source]
 
@@ -1304,8 +1360,9 @@ def _react_tools(vectorstore, session_id: str, use_graph: bool, clarify_allowed:
         def graph_search(query: str) -> str:
             """Search entity relationships in the knowledge graph for the query -
             covers the personal session and every attached knowledge base."""
-            from app.services.graph_store import query_graph
-            parts = []
+            from langchain_core.documents import Document
+            from graph_store_pipeline import query_graph
+            docs = []
             for sid in all_session_ids:
                 try:
                     result = query_graph(query, sid)
@@ -1313,8 +1370,14 @@ def _react_tools(vectorstore, session_id: str, use_graph: bool, clarify_allowed:
                     logger.warning(f"[REACT] graph_search failed for session={sid} ({e})")
                     continue
                 if result:
-                    parts.append(result)
-            return "\n\n".join(parts) if parts else "No graph relationships found."
+                    docs.append(Document(
+                        page_content=result,
+                        metadata={"source": "Knowledge Graph", "chunk_index": 0},
+                    ))
+            if not docs:
+                return "No graph relationships found."
+            _tag_and_collect(docs, collected_docs)
+            return _format_tool_docs(docs)
         tools.append(graph_search)
 
     if clarify_allowed:
@@ -1385,6 +1448,15 @@ def _react_answer(
         if sources else ""
     )
 
+    graph_guidance = (
+        " Call graph_search when the question is about relationships or connections "
+        "between entities (e.g. who reports to whom, how two people/documents/orgs are "
+        "linked, multi-hop questions) - use it alongside vector_search/read_source, not "
+        "instead of them. Also fall back to graph_search if vector_search/read_source "
+        "don't turn up a clear answer - the knowledge graph may surface a relationship "
+        "the document text doesn't state directly."
+        if use_graph else ""
+    )
     system_prompt = (
         f"{_ARIA_SYSTEM}\n\n"
         f"{sources_block}"
@@ -1393,9 +1465,14 @@ def _react_answer(
         "when the user asks what a file/chat/email/inbox contains or is about, wants a "
         "summary/overview, or asks for key points/risks/takeaways that may not be in the "
         "document's exact words (reason over what read_source returns to synthesize those - "
-        "don't require the literal word to appear). Call tools as many times as needed, then "
-        "give your final answer in plain text. If nothing relevant is found after searching, "
-        "say so honestly."
+        f"don't require the literal word to appear).{graph_guidance} Call tools as many times "
+        "as needed, then give your final answer in plain text. If nothing relevant is found "
+        "after searching, say so honestly.\n\n"
+        "Every tool result is tagged with a source number like \"[Source #3: ...]\". After "
+        "writing your final answer, add one last line by itself: \"CITED: \" followed by a "
+        "comma-separated list of ONLY the source numbers whose content you actually drew on "
+        "to write that answer - leave out numbers for results you looked at but didn't end up "
+        "using. If you used nothing from the tools, write \"CITED: none\"."
     )
 
     agent = create_agent(_react_llm_with_fallbacks(tools), tools, system_prompt=system_prompt)
@@ -1415,10 +1492,14 @@ def _react_answer(
         return clarify_holder["question"], elapsed_ms, []
 
     answer = result["messages"][-1].content
+    answer, cited_docs = _apply_citation_filter(answer, collected_docs)
     elapsed_ms = int((time.time() - t0) * 1000)
     tool_calls = sum(1 for m in result["messages"] if getattr(m, "tool_calls", None))
-    logger.info(f"[REACT] done in {elapsed_ms}ms, {tool_calls} tool-call step(s), {len(collected_docs)} docs collected")
-    return answer, elapsed_ms, _build_citations(collected_docs)
+    logger.info(
+        f"[REACT] done in {elapsed_ms}ms, {tool_calls} tool-call step(s), "
+        f"{len(collected_docs)} docs retrieved, {len(cited_docs)} actually cited"
+    )
+    return answer, elapsed_ms, _build_citations(cited_docs)
 
 
 # ── Query guard (prompt injection + identity) ─────────────────────────────────
@@ -1674,7 +1755,7 @@ def answer_question(
             _history_append(session_id, "assistant", answer)
             return answer, elapsed_ms, citations
 
-        logger.info("[CHAT] Running advanced pipeline (QueryRewrite + BM25 + MMR + Neo4j + Rerank)")
+        logger.info("[CHAT] Running advanced pipeline (QueryRewrite + BM25 + MMR + Graph + Rerank)")
         initial_state: RAGState = {
             "question":      question,
             "sources":       sources,

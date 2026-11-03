@@ -62,7 +62,7 @@ async def _seed_default_session():
         logger.warning(f"[DEFAULT] Bucket sync failed, falling back to bundled sample: {e}")
 
     try:
-        from app.services.vector_store import get_vector_store, session_has_data
+        from vector_store_pipeline import get_vector_store, session_has_data
         from app.services.rag import chunk_text
         from app.routers.upload import _add_texts_batched
 
@@ -105,7 +105,7 @@ async def _periodic_default_kb_sync():
 async def _warmup_embeddings():
     """Make a dummy embed call so the HF connection + credentials are validated before the first user."""
     try:
-        from app.services.vector_store import get_embeddings
+        from vector_store_pipeline import get_embeddings
         embeddings = get_embeddings()
         await asyncio.to_thread(embeddings.embed_query, "warmup")
         logger.info("[WARMUP] Embedding model ready")
@@ -116,7 +116,7 @@ async def _warmup_embeddings():
 async def _warmup_bm25():
     """Pre-build the BM25 index for the default session so the first retrieval is instant."""
     try:
-        from app.services.vector_store import get_vector_store
+        from vector_store_pipeline import get_vector_store
         from app.services.rag import _get_or_build_bm25
         store = get_vector_store(DEFAULT_SESSION_ID)
         _get_or_build_bm25(store, DEFAULT_SESSION_ID)
@@ -142,7 +142,7 @@ async def _warmup_parser():
     """Parse a minimal PDF so LiteParse initialises its internal models before the first user upload."""
     try:
         import tempfile
-        from app.services.ingestion import parse_file
+        from ingestion_pipeline import parse_file
         # Minimal valid single-page PDF (no text content - just enough to trigger LiteParse init)
         minimal_pdf = (
             b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"

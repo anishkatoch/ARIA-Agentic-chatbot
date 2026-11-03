@@ -174,7 +174,7 @@ Respond ONLY with valid JSON, no explanation outside JSON:
 def test_vectorstore():
     """Build an in-memory Chroma vector store from CORPUS_CHUNKS."""
     from langchain_community.vectorstores import Chroma
-    from app.services.vector_store import get_embeddings
+    from vector_store_pipeline import get_embeddings
 
     embedding_fn = get_embeddings()
     docs = [
@@ -402,12 +402,12 @@ class TestHybridRetrieve:
 
 class TestNeo4j:
     def test_driver_connects(self):
-        from app.services.graph_store import _get_driver
+        from graph_store_pipeline.core import _get_driver
         driver = _get_driver()
         assert driver is not None, "Neo4j driver should connect with .env credentials"
 
     def test_build_and_query_graph(self):
-        from app.services.graph_store import build_graph, query_graph
+        from graph_store_pipeline import build_graph, query_graph
         from app.services.rag import get_llm
         llm = get_llm()
         test_sid = "neo4j_unit_test_session_001"
@@ -420,9 +420,22 @@ class TestNeo4j:
         logger.info(f"[NEO4J TEST] graph result: {result[:300]}")
 
     def test_query_graph_empty_session_returns_empty(self):
-        from app.services.graph_store import query_graph
+        from graph_store_pipeline import query_graph
         result = query_graph("some question", "nonexistent_session_xyz_000")
         assert result == "", "Empty session should return empty string"
+
+
+class TestCosmosGremlinFallback:
+    """Azure Cosmos DB (Gremlin API) is the fallback used when Neo4j is
+    unset or unreachable - see graph_store_pipeline/core.py."""
+
+    def test_gremlin_client_connects_when_configured(self):
+        from app.config import cfg
+        if not cfg.cosmos_gremlin_key:
+            pytest.skip("COSMOS_GREMLIN_KEY not set in .env - fallback not configured")
+        from graph_store_pipeline.core import _get_gremlin_client
+        gclient = _get_gremlin_client()
+        assert gclient is not None, "Cosmos Gremlin client should connect - check COSMOS_GREMLIN_* in .env"
 
 
 class TestLatency:

@@ -1,77 +1,105 @@
-"""Tracks cumulative token usage per embedding model so the app can
-automatically switch to the next model in the priority list once a
-model's free quota is used up, or once a call against it fails outright.
+"""Tracks cumulative token usage per embedding model so this package can
+automatically switch to the next model in a priority list once a model's
+free quota is used up, or once a call against it fails outright.
 
 Usage is cached in memory (read-through) and persisted to Postgres
-(write-through) so it survives restarts; if the DB is unavailable the
-app still works, it just can't remember usage across restarts.
+(write-through, in its own `embedding_model_usage` table - created on first
+use, no migration needed) so it survives restarts; if no DB is configured
+or it's unavailable, this still works, it just can't remember usage across
+restarts.
 """
 import logging
 import threading
 
-from app.config import cfg
+from .config import cfg
 
 logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _cache: dict[str, dict] = {}   # model -> {"tokens_used": int, "status": str}
 _loaded = False
+_table_ready = False
 
 
-def _get_db_session():
+def _ensure_table(conn) -> None:
+    global _table_ready
+    if _table_ready:
+        return
+    conn.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS embedding_model_usage (
+            model TEXT PRIMARY KEY,
+            provider TEXT,
+            tokens_used BIGINT DEFAULT 0,
+            status TEXT DEFAULT 'active',
+            last_error TEXT
+        )
+        """
+    )
+    _table_ready = True
+
+
+def _get_engine():
+    if not cfg.db_url:
+        return None
     try:
-        from app.db.session import get_session_factory
-        factory = get_session_factory()
-        if factory is None:
-            return None
-        return factory()
+        from .store import get_db_engine
+        return get_db_engine()
     except Exception as e:
-        logger.warning(f"[EMBED-USAGE] DB session unavailable: {e}")
+        logger.warning(f"[EMBED-USAGE] DB engine unavailable: {e}")
         return None
 
 
 def _load_from_db() -> None:
     global _loaded
-    db = _get_db_session()
-    if db is None:
+    engine = _get_engine()
+    if engine is None:
         _loaded = True  # nothing to load - proceed with in-memory defaults
         return
     try:
-        from app.models.db import EmbeddingModelUsage
-        rows = db.query(EmbeddingModelUsage).all()
-        for row in rows:
-            _cache[row.model] = {"tokens_used": row.tokens_used or 0, "status": row.status or "active"}
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            _ensure_table(conn)
+            rows = conn.execute(text("SELECT model, tokens_used, status FROM embedding_model_usage")).fetchall()
+            for model, tokens_used, status in rows:
+                _cache[model] = {"tokens_used": tokens_used or 0, "status": status or "active"}
         _loaded = True
     except Exception as e:
         logger.warning(f"[EMBED-USAGE] Failed to load usage from DB: {e}")
         _loaded = True
-    finally:
-        db.close()
 
 
 def _persist(model: str, provider: str) -> None:
-    db = _get_db_session()
-    if db is None:
+    engine = _get_engine()
+    if engine is None:
         return
     try:
-        from app.models.db import EmbeddingModelUsage
-        row = db.get(EmbeddingModelUsage, model)
+        from sqlalchemy import text
         state = _cache[model]
-        if row is None:
-            row = EmbeddingModelUsage(model=model, provider=provider)
-            db.add(row)
-        row.tokens_used = state["tokens_used"]
-        row.status = state["status"]
-        row.last_error = state.get("last_error")
-        db.commit()
+        with engine.begin() as conn:
+            _ensure_table(conn)
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO embedding_model_usage (model, provider, tokens_used, status, last_error)
+                    VALUES (:model, :provider, :tokens_used, :status, :last_error)
+                    ON CONFLICT (model) DO UPDATE SET
+                        provider = EXCLUDED.provider,
+                        tokens_used = EXCLUDED.tokens_used,
+                        status = EXCLUDED.status,
+                        last_error = EXCLUDED.last_error
+                    """
+                ),
+                {
+                    "model": model,
+                    "provider": provider,
+                    "tokens_used": state["tokens_used"],
+                    "status": state["status"],
+                    "last_error": state.get("last_error"),
+                },
+            )
     except Exception as e:
         logger.warning(f"[EMBED-USAGE] Failed to persist usage for {model}: {e}")
-        try:
-            db.rollback()
-        except Exception:
-            pass
-    finally:
-        db.close()
 
 
 def _ensure_loaded() -> None:

@@ -10,7 +10,7 @@ import httpx
 from liteparse import LiteParse
 from playwright.async_api import async_playwright
 
-from app.config import cfg
+from .config import cfg
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,12 @@ def _parse_with_docling(tmp_path: str) -> tuple[str, list[dict]]:
     return full_text, page_spans
 
 
-async def _parse_zip(content: bytes, filename: str) -> tuple[str, list[dict]]:
+async def _parse_zip(
+    content: bytes,
+    filename: str,
+    max_file_size_mb: int,
+    zip_max_entries: int,
+) -> tuple[str, list[dict]]:
     """Extracts every entry in the zip and parses each one through
     parse_file() recursively, concatenating the results with a per-file
     header so the combined text reads as one document but still lets the
@@ -100,11 +105,11 @@ async def _parse_zip(content: bytes, filename: str) -> tuple[str, list[dict]]:
     full_text = ""
     page_spans: list[dict] = []
 
-    max_entry_bytes = cfg.max_file_size_mb * 1024 * 1024
+    max_entry_bytes = max_file_size_mb * 1024 * 1024
 
     def _read_entries() -> list[tuple[str, bytes]]:
         with zipfile.ZipFile(BytesIO(content)) as zf:
-            infos = [i for i in zf.infolist() if not i.filename.endswith("/")][:cfg.zip_max_entries]
+            infos = [i for i in zf.infolist() if not i.filename.endswith("/")][:zip_max_entries]
             entries = []
             for info in infos:
                 # Guard against a decompression-bomb entry (tiny compressed
@@ -126,8 +131,11 @@ async def _parse_zip(content: bytes, filename: str) -> tuple[str, list[dict]]:
     for entry_name, entry_content in entries:
         try:
             if entry_content is None:
-                raise ValueError(f"exceeds {cfg.max_file_size_mb} MB per-file limit, skipped")
-            entry_text, _ = await parse_file(entry_content, entry_name)
+                raise ValueError(f"exceeds {max_file_size_mb} MB per-file limit, skipped")
+            entry_text, _ = await parse_file(
+                entry_content, entry_name,
+                max_file_size_mb=max_file_size_mb, zip_max_entries=zip_max_entries,
+            )
         except Exception as e:
             logger.warning(f"[PARSE][ZIP] {filename} -> could not parse entry {entry_name}: {e}")
             entry_text = f"(could not extract text from this file: {e})"
@@ -145,14 +153,29 @@ async def _parse_zip(content: bytes, filename: str) -> tuple[str, list[dict]]:
     return full_text, page_spans
 
 
-async def parse_file(content: bytes, filename: str) -> tuple[str, list[dict]]:
+async def parse_file(
+    content: bytes,
+    filename: str,
+    *,
+    max_file_size_mb: int | None = None,
+    zip_max_entries: int | None = None,
+) -> tuple[str, list[dict]]:
+    """Parses a file's raw bytes into (full_text, page_spans).
+
+    max_file_size_mb/zip_max_entries only matter for .zip inputs (per-entry
+    size guard and max entries to read) - they default to this package's own
+    config but a host app can pass its own limits through on every call.
+    """
+    max_file_size_mb = max_file_size_mb if max_file_size_mb is not None else cfg.max_file_size_mb
+    zip_max_entries  = zip_max_entries if zip_max_entries is not None else cfg.zip_max_entries
+
     ext = os.path.splitext(filename)[1].lower()
     size_kb = len(content) / 1024
     logger.info(f"[PARSE] Starting - file={filename}, size={size_kb:.1f} KB, type={ext}")
     t0 = time.time()
 
     if ext == ".zip":
-        full_text, page_spans = await _parse_zip(content, filename)
+        full_text, page_spans = await _parse_zip(content, filename, max_file_size_mb, zip_max_entries)
         logger.info(f"[PARSE] Done (zip) - entries={len(page_spans)}, chars={len(full_text)}, time={time.time()-t0:.2f}s")
         return full_text, page_spans
 

@@ -6,8 +6,8 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, Form, Response
 
-from app.services.ingestion import parse_file
-from app.services.vector_store import get_vector_store
+from ingestion_pipeline import parse_file
+from vector_store_pipeline import get_vector_store
 from app.services.rag import chunk_text, answer_question
 
 logger = logging.getLogger(__name__)

@@ -9,8 +9,8 @@
   <link rel="icon" type="image/x-icon" href="/favicon.ico" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@18.1.2/lib/marked.umd.js" integrity="sha384-nCN5FOaVTXXYilftBH/VQuC9ypBYOxrctAZn2x7ggYClXaporWSzM0y+ODhb8MTi" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js" integrity="sha384-0w2KAL2YHP6wKOkUDzkCDGgVvfmHnj02DHeQ6XcHOgTfFsGyonKOpShMH1x6nk9o" crossorigin="anonymous"></script>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
@@ -347,7 +347,7 @@
   </main>
 
   <!-- Connector browse modal - pops up above everything for Browse actions -->
-  <div id="connector-modal" class="connector-modal-overlay hidden" onclick="if(event.target===this) closeConnectorModal()">
+  <div id="connector-modal" class="connector-modal-overlay hidden" role="presentation" onclick="if(event.target===this) closeConnectorModal()">
     <div class="connector-modal">
       <div class="connector-modal-header">
         <div class="connector-modal-title" id="connector-modal-title">Browse</div>

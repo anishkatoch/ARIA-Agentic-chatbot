@@ -6,7 +6,7 @@ models.py, router.py) has zero knowledge of how documents get parsed, chunked,
 embedded, or deduplicated - they only deal with "fetch bytes + a filename from
 some third-party source". This module is the single adapter seam between
 that world and this app's RAG pipeline (app.routers.upload, app.services.dedup,
-app.services.ingestion, app.services.rag, app.services.vector_store).
+ingestion_pipeline, app.services.rag, vector_store_pipeline).
 
 If you are lifting app/connectors/ into a different host application, this is
 the ONLY file you need to rewrite. Everything else in the package can be
@@ -48,9 +48,9 @@ from fastapi import HTTPException
 
 from app.config import cfg
 from app.services import dedup as dedup_svc
-from app.services.ingestion import parse_file
+from ingestion_pipeline import parse_file
 from app.services.rag import chunk_text_with_offsets, find_page
-from app.services.vector_store import get_vector_store
+from vector_store_pipeline import get_vector_store
 from app.routers.upload import ALLOWED_EXTENSIONS, _add_texts_batched_parallel
 
 logger = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ async def _scrape_links_in_text(text: str, max_links: int = 3) -> str:
     not just the bare URL string. Capped at max_links per message to bound
     latency; a link that fails to scrape is noted inline, not fatal to the
     rest of the ingest."""
-    from app.services.ingestion import scrape_url
+    from ingestion_pipeline import scrape_url
 
     urls = list(dict.fromkeys(_URL_RE.findall(text or "")))[:max_links]
     if not urls:
@@ -129,7 +129,10 @@ async def ingest_bytes(provider: str, content: bytes, filename: str, user_id: st
     session_id = dedup_svc.resolve_session_id(session_id, client_token, alt_client_token) or str(uuid.uuid4())
     store = get_vector_store(session_id)
 
-    text, page_spans = await parse_file(content, filename)
+    text, page_spans = await parse_file(
+        content, filename,
+        max_file_size_mb=cfg.max_file_size_mb, zip_max_entries=cfg.zip_max_entries,
+    )
     avg_conf = None
     if page_spans:
         confs = [float(p["confidence"]) for p in page_spans if p.get("confidence")]
@@ -287,7 +290,10 @@ async def ingest_gmail_message(message_id: str, user_id: str, client_token: str,
         att_filename = att.get("filename") or "attachment"
         try:
             att_content, _ = connector.download_attachment(message_id, att["attachment_id"], att_filename)
-            att_text, _ = await parse_file(att_content, att_filename)
+            att_text, _ = await parse_file(
+                att_content, att_filename,
+                max_file_size_mb=cfg.max_file_size_mb, zip_max_entries=cfg.zip_max_entries,
+            )
             parts.append(f"\n--- Attachment: {att_filename} ---\n{att_text}")
         except Exception as e:
             logger.warning(f"[CONNECTORS][GMAIL] Could not extract text from attachment {att_filename}: {e}")
@@ -337,7 +343,10 @@ async def ingest_google_chat_space(space_id: str, user_id: str, client_token: st
                 continue
             try:
                 att_content, _ = connector.download_attachment(resource_name, att_filename)
-                att_text, _ = await parse_file(att_content, att_filename)
+                att_text, _ = await parse_file(
+                att_content, att_filename,
+                max_file_size_mb=cfg.max_file_size_mb, zip_max_entries=cfg.zip_max_entries,
+            )
                 lines.append(f"\n--- Attachment: {att_filename} ---\n{att_text}")
             except Exception as e:
                 logger.warning(f"[CONNECTORS][GOOGLE_CHAT] Could not extract text from attachment {att_filename}: {e}")
@@ -396,7 +405,10 @@ async def ingest_outlook_message(message_id: str, user_id: str, client_token: st
         att_filename = att.get("filename") or "attachment"
         try:
             att_content, _ = connector.download_attachment(message_id, att["attachment_id"], att_filename)
-            att_text, _ = await parse_file(att_content, att_filename)
+            att_text, _ = await parse_file(
+                att_content, att_filename,
+                max_file_size_mb=cfg.max_file_size_mb, zip_max_entries=cfg.zip_max_entries,
+            )
             parts.append(f"\n--- Attachment: {att_filename} ---\n{att_text}")
         except Exception as e:
             logger.warning(f"[CONNECTORS][OUTLOOK] Could not extract text from attachment {att_filename}: {e}")

@@ -1,0 +1,4 @@
+neo4j
+gremlinpython
+langchain-core
+pyyaml   # optional - only needed to read database/graph names from a host app's config.yaml

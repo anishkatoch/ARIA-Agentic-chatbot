@@ -16,7 +16,7 @@ document.addEventListener('DOMContentLoaded', () => {
   adminState.token = localStorage.getItem('rag_admin_token');
   if (adminState.token) {
     showDashboard();
-    loadKnowledgeBases();
+    void loadKnowledgeBases();
   }
   setupFilesDropzone();
 });
@@ -65,7 +65,7 @@ async function handleAdminLogin(event) {
     adminState.token = data.token;
     localStorage.setItem('rag_admin_token', data.token);
     showDashboard();
-    loadKnowledgeBases();
+    void loadKnowledgeBases();
   } catch (e) {
     errEl.textContent = e.message;
     errEl.classList.remove('hidden');
@@ -106,7 +106,7 @@ function switchAdminTab(tab) {
   document.getElementById('users-panel').classList.toggle('hidden', tab !== 'users');
   document.getElementById('btn-new-kb').classList.toggle('hidden', tab !== 'kb');
   document.getElementById('btn-new-user').classList.toggle('hidden', tab !== 'users');
-  if (tab === 'users') loadUsers();
+  if (tab === 'users') void loadUsers();
 }
 
 /* ── Reusable role editor (used by KB access + user roles, both create
@@ -120,7 +120,7 @@ function switchAdminTab(tab) {
 function buildRolesEditor(containerId, initialRoles = []) {
   adminState.rolesEditors[containerId] = { roles: _normalizeRolesClient(initialRoles) };
   renderRolesEditor(containerId);
-  loadKnownRoles(() => renderRolesPickerBody(containerId));
+  void loadKnownRoles(() => renderRolesPickerBody(containerId));
 }
 
 function _normalizeRolesClient(roles) {
@@ -517,7 +517,7 @@ function kbCardHtml(kb) {
         <span class="kb-status-badge ${kb.status}">${kb.status}</span>
       </div>
       <div class="kb-card-desc">${escHtml(kb.description || 'No description')}</div>
-      ${processing ? `<div class="kb-processing-badge"><span class="kb-spinner"></span> Processing ${kb.processing_count} file${kb.processing_count === 1 ? '' : ''}...</div>` : ''}
+      ${processing ? `<div class="kb-processing-badge"><span class="kb-spinner"></span> Processing ${kb.processing_count} file${kb.processing_count === 1 ? '' : 's'}...</div>` : ''}
       <div class="kb-card-meta">
         <span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>${kb.document_count} file${kb.document_count === 1 ? '' : 's'}</span>
         <span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>Created ${created}</span>
@@ -670,7 +670,7 @@ function openFilesModal(kbId) {
   document.getElementById('files-progress').innerHTML = '';
   document.getElementById('files-item-id').value = '';
   document.getElementById('files-modal-backdrop').classList.remove('hidden');
-  loadKbFiles(kbId);
+  void loadKbFiles(kbId);
 }
 function closeFilesModal() {
   document.getElementById('files-modal-backdrop').classList.add('hidden');
@@ -792,7 +792,7 @@ function setupFilesDropzone() {
   const input = document.getElementById('files-input');
 
   zone.addEventListener('click', (e) => { if (e.target.tagName !== 'LABEL') input.click(); });
-  input.addEventListener('change', () => { if (input.files.length) uploadFiles(input.files); input.value = ''; });
+  input.addEventListener('change', () => { if (input.files.length) void uploadFiles(input.files); input.value = ''; });
 
   ['dragenter', 'dragover'].forEach(evt =>
     zone.addEventListener(evt, (e) => { e.preventDefault(); zone.classList.add('dragover'); })
@@ -801,7 +801,7 @@ function setupFilesDropzone() {
     zone.addEventListener(evt, (e) => { e.preventDefault(); zone.classList.remove('dragover'); })
   );
   zone.addEventListener('drop', (e) => {
-    if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
+    if (e.dataTransfer.files.length) void uploadFiles(e.dataTransfer.files);
   });
 }
 
@@ -871,8 +871,8 @@ async function uploadFiles(fileList) {
       else if (ev.type === 'error') addRow(ev.message, 'error');
       else if (ev.type === 'complete') {
         addRow(ev.completion_message || 'Done', 'done');
-        loadKbFiles(kbId);
-        loadKnowledgeBases();
+        void loadKbFiles(kbId);
+        void loadKnowledgeBases();
       }
     });
   } catch (e) {

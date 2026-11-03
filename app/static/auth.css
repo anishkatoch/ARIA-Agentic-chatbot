@@ -464,7 +464,7 @@ html, body {
 
 /* Fields */
 .field { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
-.field label { font-size: 12px; font-weight: 600; color: #5a587a; }
+.field label, .field .field-label { font-size: 12px; font-weight: 600; color: #5a587a; }
 .input-wrap { position: relative; display: flex; align-items: center; }
 .input-icon {
   position: absolute; left: 12px;

@@ -11,8 +11,8 @@ from fastapi.responses import StreamingResponse
 
 from app.config import cfg
 from app.models.schemas import APIIngestRequest, IngestResponse, ConfirmRequest, ConfirmResponse
-from app.services.ingestion import parse_file, scrape_url, fetch_api, PLAIN_TEXT_EXTENSIONS
-from app.services.vector_store import get_vector_store, delete_vectors_by_source
+from ingestion_pipeline import parse_file, scrape_url, fetch_api, PLAIN_TEXT_EXTENSIONS
+from vector_store_pipeline import get_vector_store, delete_vectors_by_source
 from app.services.rag import chunk_text, chunk_text_with_offsets, find_page, get_llm, invalidate_bm25_cache
 from app.services import dedup as dedup_svc
 from app.db.session import get_session_factory
@@ -61,20 +61,20 @@ async def _add_texts_batched_parallel(store, texts: list[str], metadatas: list[d
 
 async def _build_graph_async(chunks: list[str], session_id: str, filename: str):
     try:
-        from app.services.graph_store import build_graph
+        from graph_store_pipeline import build_graph
         llm = get_llm()
         ok = await asyncio.to_thread(build_graph, chunks, session_id, llm)
         if ok:
             logger.info(f"[GRAPH] Built graph for {filename} session={session_id}")
         else:
-            logger.warning(f"[GRAPH] Graph build skipped for {filename} (no Neo4j or no entities)")
+            logger.warning(f"[GRAPH] Graph build skipped for {filename} (no graph backend configured or no entities)")
     except Exception as e:
         logger.warning(f"[GRAPH] entity extraction failed for {filename}: {e}")
 
 
 async def _copy_graph_async(old_session_id: str, new_session_id: str):
     try:
-        from app.services.graph_store import copy_graph_session
+        from graph_store_pipeline import copy_graph_session
         await asyncio.to_thread(copy_graph_session, old_session_id, new_session_id)
     except Exception as e:
         logger.warning(f"[GRAPH] copy_graph_session failed: {e}")
@@ -291,7 +291,10 @@ async def upload_files(
                 await asyncio.sleep(0)
 
                 t1 = time.time()
-                text_for_dedup, page_spans = await parse_file(content, filename)
+                text_for_dedup, page_spans = await parse_file(
+                    content, filename,
+                    max_file_size_mb=cfg.max_file_size_mb, zip_max_entries=cfg.zip_max_entries,
+                )
                 avg_conf = None
                 if page_spans:
                     confs = [float(p["confidence"]) for p in page_spans if p.get("confidence")]
@@ -338,7 +341,7 @@ async def upload_files(
                         copied = await dedup_svc.copy_vectors_to_master(result.session_id, master_store)
                         elapsed = round(time.time() - t1, 2)
                         logger.info(f"[DEDUP] {filename} → reused, copied {copied} vectors")
-                        # Copy Neo4j graph entities from old session to new master session
+                        # Copy graph entities from old session to new master session
                         _spawn_background(_copy_graph_async(result.session_id, master_session_id))
 
                         yield sse({"type": "step", "status": "done", "stage": f"dedup_{i}",
@@ -407,7 +410,7 @@ async def upload_files(
                     copied = await dedup_svc.copy_vectors_to_master(result.session_id, master_store)
                     elapsed = round(time.time() - t1, 2)
                     logger.info(f"[DEDUP] {filename} → reused, copied {copied} vectors")
-                    # Copy Neo4j graph entities from old session to new master session
+                    # Copy graph entities from old session to new master session
                     _spawn_background(_copy_graph_async(result.session_id, master_session_id))
 
                     yield sse({"type": "step", "status": "done", "stage": f"dedup_{i}",
@@ -545,7 +548,7 @@ async def upload_files(
                            "elapsed": elapsed})
                 await asyncio.sleep(0)
 
-                # Build Neo4j graph async (doesn't block SSE stream)
+                # Build graph async (doesn't block SSE stream)
                 _spawn_background(_build_graph_async(batch_texts, master_session_id, filename))
 
                 # Mark complete in DB

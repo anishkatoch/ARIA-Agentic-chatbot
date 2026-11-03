@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Header, Request
 
 from app.models.schemas import ChatRequest, ChatResponse
 from app.services import kb_cache, roles_service, session_attachments
-from app.services.vector_store import get_vector_store, session_has_data
+from vector_store_pipeline import get_vector_store, session_has_data
 from app.services.rag import answer_question
 from app.config import DEFAULT_SESSION_ID
 

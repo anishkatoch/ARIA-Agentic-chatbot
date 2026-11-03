@@ -1,31 +1,16 @@
 import logging
-from sqlalchemy import create_engine
-from sqlalchemy.engine import Engine
+
 from langchain_core.embeddings import Embeddings
 from langchain_openai import OpenAIEmbeddings
-from langchain_postgres.vectorstores import PGVector
-from langchain_chroma import Chroma
 
-from app.config import cfg
+from .config import cfg
 
 logger = logging.getLogger(__name__)
-
-# One shared connection pool for every session's PGVector store, instead of
-# each session opening (and cold-starting) its own pool against Supabase.
-_db_engine: Engine | None = None
-
-
-def _get_db_engine() -> Engine:
-    global _db_engine
-    if _db_engine is None:
-        _db_engine = create_engine(cfg.db_url, pool_pre_ping=True)
-    return _db_engine
-
 
 _PROVIDERS = {}  # populated below, after each _try_* is defined
 
 # Embedding provider selection doesn't depend on session_id, so one instance
-# serves every session - skips re-resolving the provider (incl. a DB lookup
+# serves every caller - skips re-resolving the provider (incl. a DB lookup
 # for Voyage's active-model tracking) on every call.
 _embeddings_cache = None
 
@@ -36,7 +21,7 @@ def get_embeddings():
         return _embeddings_cache
 
     logger.info(f"[EMBED] Provider priority: {cfg.embedding_provider}")
-    primary = _PROVIDERS.get(cfg.embedding_provider, _try_bge)
+    primary = _PROVIDERS.get(cfg.embedding_provider, _try_openai)
     fallbacks = [fn for name, fn in _PROVIDERS.items() if fn is not primary]
     for try_fn in [primary, *fallbacks]:
         embeddings = try_fn()
@@ -72,11 +57,11 @@ class _ResilientEmbeddings(Embeddings):
     The fallback is constructed with OpenAI's native `dimensions` parameter
     set to cfg.embedding_dim (the primary provider's configured dimension),
     so a fallback vector stays dimensionally compatible with whatever's
-    already stored in this session's collection - without this, a partial
-    fallback mid-batch would corrupt the collection (most vector stores
-    reject mismatched-width vectors outright, but a successful Chroma/
-    pgvector write of the wrong width would silently break future
-    similarity search instead).
+    already stored in the vector store - without this, a partial fallback
+    mid-batch would corrupt the collection (most vector stores reject
+    mismatched-width vectors outright, but a successful Chroma/pgvector
+    write of the wrong width would silently break future similarity search
+    instead).
 
     Only engages when OPENAI_API_KEY is configured and the primary isn't
     already OpenAI (nothing meaningful to fall back to in that case)."""
@@ -124,20 +109,6 @@ class _ResilientEmbeddings(Embeddings):
             return fallback.embed_query(text)
 
 
-def _try_bge():
-    try:
-        from langchain_huggingface import HuggingFaceEndpointEmbeddings
-        embeddings = HuggingFaceEndpointEmbeddings(
-            model=cfg.hf_model_id,
-            huggingfacehub_api_token=cfg.hf_api_key,
-        )
-        logger.info(f"[EMBED] Using {cfg.hf_model_id} (HuggingFace Inference API, {cfg.embedding_dim} dims)")
-        return embeddings
-    except Exception as e:
-        logger.warning(f"[EMBED] BGE unavailable ({e})")
-        return None
-
-
 def _try_openai():
     try:
         embeddings = OpenAIEmbeddings(
@@ -154,16 +125,16 @@ def _try_openai():
 class _DynamicVoyageEmbeddings(Embeddings):
     """Voyage embeddings that automatically switch to the next model in
     cfg.voyage_models once the active one's free quota is exhausted (tracked
-    in the embedding_model_usage DB table) or a call against it fails
-    outright. All configured models are forced to the same output dimension
-    so switching never produces vectors incompatible with what's already
-    stored in the vector store."""
+    in the embedding_model_usage DB table, see usage_tracking.py) or a call
+    against it fails outright. All configured models are forced to the same
+    output dimension so switching never produces vectors incompatible with
+    what's already stored in the vector store."""
 
     def __init__(self, models: list[dict]):
         self._models = models or [{"model": cfg.voyage_model_id, "free_tokens": None}]
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
-        from app.services.embedding_usage import pick_active_model, record_usage, mark_exhausted, mark_broken
+        from .usage_tracking import pick_active_model, record_usage, mark_exhausted, mark_broken
         import voyageai
 
         client = voyageai.Client(api_key=cfg.voyage_api_key)
@@ -206,7 +177,7 @@ def _try_voyage():
     try:
         if not cfg.voyage_api_key:
             raise ValueError("VOYAGE_API_KEY not set")
-        from app.services.embedding_usage import pick_active_model
+        from .usage_tracking import pick_active_model
         models = cfg.voyage_models or [{"model": cfg.voyage_model_id, "free_tokens": None}]
         active = pick_active_model(models, provider="voyage")
         if active is None:
@@ -220,130 +191,6 @@ def _try_voyage():
 
 
 _PROVIDERS = {
-    "bge":    _try_bge,
     "openai": _try_openai,
     "voyage": _try_voyage,
 }
-
-
-# Once a session has data it only ever gains more (nothing deletes documents
-# from a live session), so "has data" never flips back to False - caching
-# only the True result sidesteps needing to invalidate this from every
-# upload/ingest call site.
-_has_data_cache: dict[str, bool] = {}
-
-
-def session_has_data(session_id: str) -> bool:
-    """Return True if the session's vector store has at least one document."""
-    if _has_data_cache.get(session_id):
-        return True
-    try:
-        store = get_vector_store(session_id)
-        if hasattr(store, "_collection"):
-            # Chroma - local count, no embedding call needed.
-            result = store._collection.count() > 0
-        else:
-            result = len(store.similarity_search("a", k=1)) > 0
-    except Exception:
-        result = False
-    if result:
-        _has_data_cache[session_id] = True
-    return result
-
-
-# Connecting PGVector/Chroma re-runs schema setup (CREATE EXTENSION/TABLE IF
-# NOT EXISTS, etc.) against the DB every time it's constructed - caching per
-# session means that cost is paid once per process, not once per chat message.
-_store_cache: dict[str, object] = {}
-
-
-def get_vector_store(session_id: str):
-    if session_id in _store_cache:
-        return _store_cache[session_id]
-
-    logger.info(f"[STORE] Initialising vector store - session={session_id}")
-    embeddings = get_embeddings()
-    if not embeddings:
-        logger.error("[STORE] No embedding provider available")
-        raise RuntimeError("No embedding provider available. Check VOYAGE_API_KEY, HUGGINGFACE_API_KEY, or OPENAI_API_KEY.")
-
-    collection = f"session_{session_id}"
-
-    if cfg.db_url:
-        try:
-            store = PGVector(
-                embeddings=embeddings,
-                collection_name=collection,
-                connection=_get_db_engine(),
-            )
-            logger.info(f"[STORE] Connected to pgvector (Supabase) - collection={collection}")
-            _store_cache[session_id] = store
-            return store
-        except Exception as e:
-            logger.warning(f"[STORE] pgvector unavailable ({e}) - falling back to ChromaDB")
-
-    # Not cached: a transient pgvector outage must not permanently pin this
-    # session to Chroma for the rest of the process's life. Leaving this
-    # uncached means the next call retries pgvector fresh, instead of this
-    # session's documents silently ending up split across two different
-    # backing stores once Supabase recovers.
-    store = Chroma(
-        collection_name=collection,
-        embedding_function=embeddings,
-        persist_directory="./chroma_data",
-    )
-    logger.info(f"[STORE] Using ChromaDB (local) - collection={collection}")
-    return store
-
-
-def delete_vectors_by_source(store, filename: str) -> int:
-    """Removes every chunk tagged with metadata source==filename (matched
-    case-insensitively - see below) from this session's vector store - used
-    when a user detaches a document from a chat (see app.routers.upload's
-    DELETE /upload/session-documents).
-
-    Matching is case-insensitive because the `documents` table stores
-    filenames lowercased (see Document.filename's comment in app/models/db.py
-    and every _insert_pending()/filename.lower() call site), but the vector
-    chunks' "source" metadata is tagged with the filename in its original
-    upload case - comparing exactly would silently leave orphaned chunks
-    behind for any mixed-case filename.
-
-    Chroma has no case-insensitive filter in its own "where" query language,
-    so this fetches all chunks' metadata and filters in Python instead -
-    O(n) in collection size, but this only runs on an explicit user "detach"
-    click, not a hot path. PGVector's public .delete() only accepts explicit
-    ids (no metadata filter at all, checked against the installed
-    langchain_postgres version), so this runs a raw SQL delete against its
-    underlying langchain_pg_embedding/langchain_pg_collection tables instead -
-    stable, documented table/column names that have been consistent across
-    langchain_postgres versions, unlike undocumented internal attributes."""
-    target = filename.lower()
-
-    if hasattr(store, "_collection"):
-        data = store._collection.get(include=["metadatas"])
-        ids = [
-            id_ for id_, meta in zip(data.get("ids", []), data.get("metadatas", []))
-            if (meta or {}).get("source", "").lower() == target
-        ]
-        if ids:
-            store._collection.delete(ids=ids)
-        return len(ids)
-
-    collection_name = getattr(store, "collection_name", None)
-    if not collection_name:
-        logger.warning(f"[STORE] delete_vectors_by_source: couldn't resolve collection name for {filename}")
-        return 0
-
-    from sqlalchemy import text
-    with _get_db_engine().begin() as conn:
-        result = conn.execute(
-            text(
-                "DELETE FROM langchain_pg_embedding e "
-                "USING langchain_pg_collection c "
-                "WHERE e.collection_id = c.uuid AND c.name = :collection "
-                "AND LOWER(e.cmetadata->>'source') = :filename"
-            ),
-            {"collection": collection_name, "filename": target},
-        )
-        return result.rowcount

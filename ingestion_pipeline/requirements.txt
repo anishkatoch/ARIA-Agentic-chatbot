@@ -1,0 +1,8 @@
+liteparse
+docling>=2.0.0
+crawl4ai
+playwright
+httpx
+fastapi
+uvicorn[standard]
+python-multipart

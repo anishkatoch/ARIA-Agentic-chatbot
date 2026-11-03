@@ -12,8 +12,8 @@ llm:
   openai_fallback_enabled: true          # true = fall back to OpenAI after all Groq models fail; false = raise error
 
 embeddings:
-  provider: voyage                       # bge | openai | voyage
-  bge_model_id: sentence-transformers/all-MiniLM-L6-v2  # via HuggingFace Inference API
+  provider: voyage                       # openai | voyage
+  bge_model_id: sentence-transformers/all-MiniLM-L6-v2  # no longer an embedding option - kept only because app/services/rag.py's HF reranker fallback reuses this model id
   openai_model: text-embedding-3-small
   voyage_model_id: voyage-4-lite         # used if voyage_models list below is empty
   # Priority-ordered fallback chain for Voyage: once a model's free monthly
@@ -46,6 +46,16 @@ retrieval:
   # to the HuggingFace sentence-similarity reranker, then to no reranking at all.
   cohere_rerank_model: rerank-v3.5          # Cohere reranker (confirmed live against docs.cohere.com on 2026-10-18)
   reranker_model: BAAI/bge-reranker-large  # HuggingFace fallback reranker model
+
+graph:
+  # Neo4j is the primary graph backend (connection URI/user/password are
+  # secrets - stay in .env as NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD).
+  # Azure Cosmos DB (Gremlin API) is the fallback, used automatically when
+  # Neo4j is unset or unreachable (endpoint/key are secrets - stay in .env
+  # as COSMOS_GREMLIN_ENDPOINT/COSMOS_GREMLIN_KEY). These two are just the
+  # database/graph names inside that Cosmos account, not secrets.
+  cosmos_gremlin_database: aria-graphdb
+  cosmos_gremlin_graph: aria-graph
 
 limits:
   max_file_size_mb: 15      # per-file cap
