@@ -616,3 +616,141 @@ LiteParse now runs in the thread pool. Event loop stays free during uploads.
 | 4 | Cold starts on first request after server restart | `main.py` | Fixed (parallel warmup) |
 | 5A | `parse_file()` blocked event loop during PDF parsing | `ingestion.py` | Fixed (thread pool) |
 | 5B | Sequential embedding batches, undersized (32 chunks) | `upload.py` | Fixed (50 chunks, 3 parallel) |
+
+---
+
+# Session date: 2026-11-03 - Pipeline Split, Hugging Face Auto-Deploy, Env Cleanup
+
+Scope: split ingestion/vector/graph services into standalone deployable packages,
+wire up GitHub Actions → Hugging Face Space auto-publish via OIDC Trusted
+Publisher, and audit `.env`/`.env.example` for dead keys.
+
+---
+
+## 1. Hugging Face publish workflow authenticated step failed with 401
+
+### Problem
+`.github/workflows/publish.yml` ran cleanly through checkout/install, but the
+`Push to Hugging Face Space` step failed:
+```
+huggingface_hub.errors.RepositoryNotFoundError: 401 Client Error.
+Repository Not Found for url: https://huggingface.co/api/spaces/anish0634/ARIA-Agentic-chatbot/preupload/main.
+Invalid username or password.
+```
+
+### Root cause
+Assumed `huggingface_hub` would auto-detect the GitHub Actions OIDC token for
+the HF Trusted Publisher exchange. It does not - it requires an explicit
+`oidc_login(resource=...)` call to mint and exchange the CI OIDC token for a
+short-lived HF token before any API call is authenticated.
+
+### Fix
+Updated `publish.yml` to call
+`huggingface_hub._oidc.oidc_login(resource=f"spaces/{repo_id}")` then
+`login(token=...)` before `HfApi().upload_folder(...)`. Verified live by
+re-running the workflow after the fix - run completed with
+`conclusion: success` and the Space received the push.
+
+### Files changed
+- `.github/workflows/publish.yml`
+
+---
+
+## 2. `connector_poc/` was a nested git repo, not committable
+
+### Problem
+`git add -A` warned "adding embedded git repository: connector_poc" - the
+folder had its own `.git` (cloned from `github.com/ShashvatSharma18/CONNECTOR_POC`),
+so it would've been added as a broken gitlink instead of real tracked files.
+
+### Investigation
+Confirmed nothing under `app/` imports from `connector_poc/` - it was
+unrelated standalone reference code, separate from the real, already-wired-in
+`app/connectors/` package.
+
+### Fix
+Deleted `connector_poc/` entirely before committing (source still exists at
+its own GitHub repo if ever needed again).
+
+### Files changed
+- Removed `connector_poc/` (untracked, not part of any prior commit)
+
+---
+
+## 3. Major refactor: ingestion/vector/graph services split into standalone pipelines
+
+### Change
+Moved `app/services/ingestion.py` → `ingestion_pipeline/core.py`,
+`app/services/vector_store.py` → `vector_store_pipeline/embeddings.py` +
+`store.py`, `app/services/embedding_usage.py` →
+`vector_store_pipeline/usage_tracking.py`, `app/services/graph_store.py` →
+`graph_store_pipeline/core.py`. Each new package got its own `README.md`,
+`requirements.txt`, and (ingestion) `Dockerfile`/`service.py` for independent
+deployment. Branch `feature/pipeline-split-and-hf-publish` created,
+committed, pushed, and merged into `main` with `--no-ff` - no conflicts.
+
+### Files changed
+- New `ingestion_pipeline/`, `vector_store_pipeline/`, `graph_store_pipeline/` packages
+- Deleted `app/services/ingestion.py`, `vector_store.py`, `embedding_usage.py`, `graph_store.py`
+- `app/connectors/pipeline_bridge.py`, `app/services/rag.py`, `app/services/dedup.py`,
+  `app/services/default_kb_sync.py` updated to import from the new packages
+
+---
+
+## 4. `.env` / `.env.example` had unused keys and stray leftover lines
+
+### Problem
+Audited every env var against actual `os.getenv`/`os.environ` usage in code
+to find dead configuration.
+
+### Found unused (zero code references) - removed from both files
+- `APP_ENV` - never read anywhere, only documented
+- `FILE_SHARE_ROOT` - no code reads it
+- `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` - no Jira connector implemented yet
+- `SALESFORCE_INSTANCE_URL`, `SALESFORCE_CLIENT_ID`, `SALESFORCE_CLIENT_SECRET`,
+  `SALESFORCE_REDIRECT_URI` - no Salesforce connector implemented yet
+- `SERVICENOW_INSTANCE_URL`, `SERVICENOW_USERNAME`, `SERVICENOW_PASSWORD` - no
+  ServiceNow connector implemented yet
+
+### Also removed from `.env` only (not template-worthy, pure cruft)
+- Two bare value-only lines (accidental duplicate paste of the Salesforce
+  client id/secret with no key name)
+- An entire unused `azure_api_key` / `Azure_OpenAI_*` block - confirmed zero
+  references anywhere in the codebase (Azure OpenAI is not wired in; the LLM
+  fallback chain is Groq → OpenAI public API only)
+
+### Note
+`.env` is git-ignored and was never tracked, so this cleanup never touched
+git history - local secrets file only.
+
+### Files changed
+- `.env`, `.env.example`
+
+---
+
+## 5. Verified Azure Cosmos DB Gremlin (graph store fallback) is actually working
+
+### Check
+Whether the Cosmos Gremlin fallback (`graph_store_pipeline/core.py`, used
+only when Neo4j is unset/unreachable) is functional, not just configured.
+
+### Verification
+Ran a live connection test against
+`wss://aria-graph-db.gremlin.cosmos.azure.com:443/` using the credentials in
+`.env` (`COSMOS_GREMLIN_ENDPOINT`/`COSMOS_GREMLIN_KEY`, db `aria-graphdb`,
+graph `aria-graph`) - successfully connected and ran
+`g.V().limit(1).count()`. Confirmed working. In normal operation the app
+uses Neo4j first (also configured and reachable), so Gremlin currently only
+serves as a tested, ready fallback.
+
+---
+
+## Summary Table
+
+| # | Issue | File(s) | Status |
+|---|---|---|---|
+| 1 | HF publish workflow 401 - OIDC login not automatic in `huggingface_hub` | `publish.yml` | Fixed |
+| 2 | `connector_poc/` nested git repo blocked commit | - | Fixed (removed) |
+| 3 | Ingestion/vector/graph services tangled in `app/services/` | `ingestion_pipeline/*`, `vector_store_pipeline/*`, `graph_store_pipeline/*` | Fixed (refactor) |
+| 4 | Dead env vars (APP_ENV, FILE_SHARE_ROOT, Jira/Salesforce/ServiceNow placeholders, stray Azure OpenAI block) | `.env`, `.env.example` | Fixed |
+| 5 | Cosmos Gremlin graph fallback - unverified | `graph_store_pipeline/core.py` | Verified working (live connection test) |
