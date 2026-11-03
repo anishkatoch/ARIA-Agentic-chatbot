@@ -25,6 +25,7 @@ class _Config:
         emb = y.get("embeddings", {})
         ret = y.get("retrieval", {})
         lim = y.get("limits", {})
+        graph = y.get("graph", {})
 
         # ── App ───────────────────────────────────────────────────
         self.port: int = int(app.get("port", 8001))
@@ -38,8 +39,11 @@ class _Config:
         self.openai_fallback_enabled: bool = bool(llm.get("openai_fallback_enabled", False))
 
         # ── Embeddings ────────────────────────────────────────────
-        self.embedding_provider: str = emb.get("provider", "bge")
-        self.hf_model_id: str        = emb.get("bge_model_id", "BAAI/bge-large-en-v1.5")
+        self.embedding_provider: str = emb.get("provider", "openai")
+        # hf_model_id is no longer used for embeddings (BGE removed as an
+        # embedding provider) - kept only because app/services/rag.py's HF
+        # reranker fallback (_rerank_hf) reuses this same free model id.
+        self.hf_model_id: str        = emb.get("bge_model_id", "sentence-transformers/all-MiniLM-L6-v2")
         self.openai_embed_model: str = emb.get("openai_model", "text-embedding-3-small")
         self.voyage_model_id: str    = emb.get("voyage_model_id", "voyage-3.5-lite")
         self.voyage_models: list     = emb.get("voyage_models", [])  # priority-ordered fallback chain with free_tokens caps
@@ -97,10 +101,19 @@ class _Config:
         self.admin_email: str    = os.getenv("ADMIN_EMAIL", "")
         self.admin_password: str = os.getenv("ADMIN_PASSWORD", "")
 
-        # ── Neo4j ─────────────────────────────────────────────────
+        # ── Neo4j (graph DB - primary) ───────────────────────────────
         self.neo4j_uri: str      = os.getenv("NEO4J_URI", "")
         self.neo4j_user: str     = os.getenv("NEO4J_USER", "neo4j")
         self.neo4j_password: str = os.getenv("NEO4J_PASSWORD", "")
+
+        # ── Azure Cosmos DB / Gremlin API (graph DB - fallback) ──────
+        # Used automatically when Neo4j above is unset or unreachable.
+        # Database/graph names come from config.yaml (not secrets);
+        # endpoint/key are secrets and stay in .env.
+        self.cosmos_gremlin_endpoint: str  = os.getenv("COSMOS_GREMLIN_ENDPOINT", "")
+        self.cosmos_gremlin_key: str       = os.getenv("COSMOS_GREMLIN_KEY", "")
+        self.cosmos_gremlin_database: str  = graph.get("cosmos_gremlin_database", "aria-graphdb")
+        self.cosmos_gremlin_graph: str     = graph.get("cosmos_gremlin_graph", "aria-graph")
 
     @property
     def db_url(self) -> str | None:
@@ -115,6 +128,21 @@ class _Config:
 
 
 cfg = _Config(_y)
+
+# ── Bridge config.yaml's embedding settings into the env vars that the
+# portable vector_store_pipeline package reads. That package is designed to
+# be copy-pasteable into any project and only knows about env vars, not this
+# app's config.yaml - without this, it silently falls back to its own
+# built-in defaults instead of what config.yaml actually says (e.g. it would
+# never learn about the Voyage model priority list below). setdefault() so
+# an operator's own explicit env var (if any) still wins.
+import json as _json
+os.environ.setdefault("EMBEDDING_PROVIDER", cfg.embedding_provider)
+os.environ.setdefault("EMBEDDING_DIM", str(cfg.embedding_dim))
+os.environ.setdefault("OPENAI_EMBED_MODEL", cfg.openai_embed_model)
+os.environ.setdefault("VOYAGE_MODEL_ID", cfg.voyage_model_id)
+os.environ.setdefault("VOYAGE_MODELS", _json.dumps(cfg.voyage_models))
+os.environ.setdefault("VOYAGE_OUTPUT_DIMENSION", str(cfg.voyage_output_dimension))
 
 # Fixed session ID for the built-in sample document
 DEFAULT_SESSION_ID = "aria_default_sample"

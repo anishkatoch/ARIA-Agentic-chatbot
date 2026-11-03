@@ -350,7 +350,8 @@
    field glowing out of a near-black modal. Scoped to .admin-modal only, so
    the login screen (out of scope, and meant to stay a white card) is
    untouched. */
-html.dark .admin-modal .field label { color: var(--text-muted, #94a3b8); }
+html.dark .admin-modal .field label,
+html.dark .admin-modal .field .field-label { color: var(--text-muted, #94a3b8); }
 html.dark .admin-modal .input-wrap input {
   background: var(--input-bg, rgba(0,0,0,.25));
   border-color: var(--border);

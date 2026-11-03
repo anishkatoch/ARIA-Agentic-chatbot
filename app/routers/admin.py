@@ -26,13 +26,14 @@ from app.models.schemas import (
     KnowledgeBaseUpdateRequest,
     UserRolesUpdateRequest,
 )
+from app.config import cfg
 from app.routers.upload import ALLOWED_EXTENSIONS, _add_texts_batched_parallel, sse, SSE_HEADERS
 from app.services import auth_service, kb_cache, kb_versioning, roles_service
 from app.services.dedup import sha256
 from app.services.diff import diff_texts
-from app.services.ingestion import parse_file
+from ingestion_pipeline import parse_file
 from app.services.rag import chunk_text_with_offsets, find_page
-from app.services.vector_store import get_vector_store
+from vector_store_pipeline import get_vector_store
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -495,7 +496,10 @@ async def upload_knowledge_base_files(
                     _db3.close()
 
             try:
-                text, page_spans = await parse_file(content, filename)
+                text, page_spans = await parse_file(
+                    content, filename,
+                    max_file_size_mb=cfg.max_file_size_mb, zip_max_entries=cfg.zip_max_entries,
+                )
             except Exception as e:
                 logger.error(f"[ADMIN][KB] Parse failed for {filename}: {e}")
                 _mark("failed")

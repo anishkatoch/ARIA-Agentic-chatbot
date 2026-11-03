@@ -1,0 +1,48 @@
+name: Publish to Hugging Face Space
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install huggingface_hub
+        run: pip install -U "huggingface_hub>=0.28"
+
+      - name: Push to Hugging Face Space
+        env:
+          HF_REPO_ID: anish0634/ARIA-Agentic-chatbot
+        run: |
+          python - <<'EOF'
+          import os
+          from huggingface_hub import HfApi
+
+          api = HfApi()
+          api.upload_folder(
+              repo_id=os.environ["HF_REPO_ID"],
+              repo_type="space",
+              folder_path=".",
+              ignore_patterns=[
+                  ".git*",
+                  ".github/*",
+                  "__pycache__/*",
+                  "*.pyc",
+                  ".venv/*",
+                  "tests/*",
+              ],
+              commit_message=f"Sync from GitHub Actions ({os.environ.get('GITHUB_SHA', '')[:7]})",
+          )
+          EOF

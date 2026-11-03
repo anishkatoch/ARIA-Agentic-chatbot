@@ -148,9 +148,9 @@
         <div class="input-wrap"><input type="text" id="kb-description" placeholder="What this knowledge base covers" /></div>
       </div>
       <div class="field">
-        <label>Access</label>
+        <span class="field-label" id="kb-create-roles-label">Access</span>
         <div class="roles-hint">Leave empty for "All roles" - visible to every signed-in user.</div>
-        <div id="kb-create-roles-editor"></div>
+        <div id="kb-create-roles-editor" role="group" aria-labelledby="kb-create-roles-label"></div>
       </div>
       <div id="create-kb-error" class="form-error hidden"></div>
       <div class="admin-modal-actions">
@@ -195,8 +195,8 @@
         <div class="input-wrap"><input type="text" id="user-password" placeholder="At least 8 characters" minlength="8" required /></div>
       </div>
       <div class="field">
-        <label>Roles</label>
-        <div id="user-create-roles-editor"></div>
+        <span class="field-label" id="user-create-roles-label">Roles</span>
+        <div id="user-create-roles-editor" role="group" aria-labelledby="user-create-roles-label"></div>
       </div>
       <div id="create-user-error" class="form-error hidden"></div>
       <div class="admin-modal-actions">

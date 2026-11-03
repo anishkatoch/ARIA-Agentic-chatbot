@@ -355,7 +355,7 @@ def cleanup_stale_pending(older_than_minutes: int = 5) -> int:
 
 def _collection_has_vectors(session_id: str) -> bool:
     try:
-        from app.services.vector_store import get_vector_store
+        from vector_store_pipeline import get_vector_store
         store = get_vector_store(session_id)
         # Chroma: check via underlying collection count
         if hasattr(store, "_collection"):
@@ -372,7 +372,7 @@ def _collection_has_vectors(session_id: str) -> bool:
 async def copy_vectors_to_master(old_session_id: str, master_store) -> int:
     def _copy():
         try:
-            from app.services.vector_store import get_vector_store
+            from vector_store_pipeline import get_vector_store
             old_store = get_vector_store(old_session_id)
             if not hasattr(old_store, "_collection"):
                 return 0

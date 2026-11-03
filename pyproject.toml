@@ -49,6 +49,7 @@ dependencies = [
     "langgraph>=0.2.0",
     "rank-bm25>=0.2.2",
     "neo4j>=5.0.0",
+    "gremlinpython>=3.7.0",
     "email-validator>=2.0.0",
     "langchain-voyageai>=0.4.1",
     "cohere>=7.2.0",
@@ -69,8 +70,8 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+testpaths = ["tests", "ingestion_pipeline/tests"]
 
 [tool.scripts]
 setup = "playwright install chromium"
-test  = "pytest tests/ -v"
+test  = "pytest tests/ ingestion_pipeline/tests/ -v"

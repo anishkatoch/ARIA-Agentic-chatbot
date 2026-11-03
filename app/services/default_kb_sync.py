@@ -36,7 +36,7 @@ def _existing_source_hashes(store) -> dict[str, str]:
     """Returns {source_filename: content_hash} for every distinct source
     currently embedded in `store`, read back from chunk metadata. Mirrors
     delete_vectors_by_source's two backend-specific read paths (Chroma vs
-    PGVector) in app.services.vector_store."""
+    PGVector) in vector_store_pipeline."""
     if hasattr(store, "_collection"):
         data = store._collection.get(include=["metadatas"])
         hashes: dict[str, str] = {}
@@ -51,8 +51,8 @@ def _existing_source_hashes(store) -> dict[str, str]:
     if not collection_name:
         return {}
     from sqlalchemy import text
-    from app.services.vector_store import _get_db_engine
-    with _get_db_engine().begin() as conn:
+    from vector_store_pipeline import get_db_engine
+    with get_db_engine().begin() as conn:
         rows = conn.execute(
             text(
                 "SELECT DISTINCT e.cmetadata->>'source' AS source, "
@@ -73,9 +73,9 @@ async def sync_default_session_from_bucket() -> int:
     re-embedded - a file whose content hash hasn't changed since the last
     sync is skipped entirely, so calling this repeatedly/on a timer is cheap.
     """
-    from app.services.vector_store import get_vector_store, delete_vectors_by_source
+    from vector_store_pipeline import get_vector_store, delete_vectors_by_source
     from app.services.rag import chunk_text_with_offsets, find_page
-    from app.services.ingestion import parse_file
+    from ingestion_pipeline import parse_file
     from app.services.dedup import sha256
     from app.connectors.pipeline_bridge import is_supported_extension
     from app.routers.upload import _add_texts_batched_parallel
@@ -115,7 +115,10 @@ async def sync_default_session_from_bucket() -> int:
             continue  # already embedded, unchanged - no re-embed
 
         try:
-            text, page_spans = await parse_file(content, name)
+            text, page_spans = await parse_file(
+                content, name,
+                max_file_size_mb=cfg.max_file_size_mb, zip_max_entries=cfg.zip_max_entries,
+            )
             chunks_with_offsets = chunk_text_with_offsets(text)
             batch_texts, batch_metas = [], []
             for chunk, start_idx in chunks_with_offsets:

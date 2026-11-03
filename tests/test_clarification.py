@@ -430,7 +430,7 @@ class TestReactToolsMultiSource:
         tools = _react_tools(MagicMock(), "personal-session", use_graph=True, clarify_allowed=False,
                               collected_docs=[], clarify_holder={}, extra_sources=extra)
         graph_tool = next(t for t in tools if t.name == "graph_search")
-        with patch("app.services.graph_store.query_graph",
+        with patch("graph_store_pipeline.query_graph",
                    side_effect=lambda q, sid: f"result-for-{sid}") as mock_query:
             result = graph_tool.invoke({"query": "who owns X"})
         queried_sessions = {c.args[1] for c in mock_query.call_args_list}
